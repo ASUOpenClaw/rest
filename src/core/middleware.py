@@ -6,27 +6,43 @@ import uuid
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import Response
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
 
-class RequestIDMiddleware(BaseHTTPMiddleware):
+class RequestIDMiddleware:
     """
-    Reads X-Request-ID from the incoming request (or generates one),
-    stores it in request.state.request_id, and echoes it back in the response.
+    Pure ASGI middleware (no BaseHTTPMiddleware) that reads X-Request-ID from
+    the incoming request or generates one, stores it in request.state, and
+    echoes it back in every response header.
+
+    Avoids the anyio task-group / event-loop conflict that BaseHTTPMiddleware
+    causes in pytest-asyncio tests.
     """
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-        request.state.request_id = request_id
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        request_id = headers.get(b"x-request-id", b"").decode() or str(uuid.uuid4())
+
+        scope.setdefault("state", {})
+        scope["state"]["request_id"] = request_id
+
+        async def send_with_id(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                mutable = MutableHeaders(scope=message)
+                mutable.append("X-Request-ID", request_id)
+            await send(message)
+
+        await self.app(scope, receive, send_with_id)
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

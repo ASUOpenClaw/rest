@@ -82,6 +82,7 @@ def _perm_gte(perm: FilePermissionLevel, min_perm: FilePermissionLevel) -> bool:
 # Current user resolution
 # ---------------------------------------------------------------------------
 
+
 # Attached to request state by auth middlewares / deps below
 class _AuthContext:
     """Carries resolved auth info through the dependency chain."""

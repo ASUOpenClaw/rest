@@ -1,43 +1,105 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: openclaw
-      POSTGRES_PASSWORD: openclaw
-      POSTGRES_DB: openclaw
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openclaw"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    postgres:
+        image: postgres:16-alpine
+        environment:
+            POSTGRES_USER: openclaw
+            POSTGRES_PASSWORD: openclaw
+            POSTGRES_DB: openclaw
+        ports:
+            - "5432:5432"
+        volumes:
+            - postgres_data:/var/lib/postgresql/data
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U openclaw"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    redis:
+        image: redis:7-alpine
+        ports:
+            - "6379:6379"
+        volumes:
+            - redis_data:/data
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
 
-  meilisearch:
-    image: getmeili/meilisearch:v1.13
-    environment:
-      MEILI_ENV: development
-      MEILI_MASTER_KEY: openclaw-dev-key
-    ports:
-      - "7700:7700"
-    volumes:
-      - meilisearch_data:/meili_data
+    meilisearch:
+        image: getmeili/meilisearch:v1.13
+        environment:
+            MEILI_ENV: development
+            MEILI_MASTER_KEY: openclaw-dev-key
+        ports:
+            - "7700:7700"
+        volumes:
+            - meilisearch_data:/meili_data
+
+    nats:
+        image: nats:2-alpine
+        command: ["-js"]
+        ports:
+            - "4222:4222"
+
+    garage:
+        image: dxflrs/garage:v1.0.1
+        ports:
+            - "3900:3900" # S3 API
+            - "3903:3903" # admin API
+        volumes:
+            - ./garage.toml:/etc/garage.toml:ro
+            - garage_meta:/var/lib/garage/meta
+            - garage_data:/var/lib/garage/data
+
+    tests:
+        build:
+            context: .
+            target: test
+        environment:
+            SECRET_KEY: test-secret-key
+            DATABASE_URL: postgresql+asyncpg://openclaw:openclaw@postgres:5432/openclaw
+            TEST_DATABASE_URL: postgresql+asyncpg://openclaw:openclaw@postgres:5432/openclaw_test
+            REDIS_URL: redis://redis:6379/0
+            NATS_URL: nats://nats:4222
+            MEILISEARCH_URL: http://meilisearch:7700
+            S3_ENDPOINT_URL: http://garage:3900
+        depends_on:
+            postgres:
+                condition: service_healthy
+        volumes:
+            - ./src:/app/src
+        profiles:
+            - test
+
+    api:
+        build: .
+        ports:
+            - "8000:8000"
+        env_file: .env
+        environment:
+            DATABASE_URL: postgresql+asyncpg://openclaw:openclaw@postgres:5432/openclaw
+            REDIS_URL: redis://redis:6379/0
+            MEILISEARCH_URL: http://meilisearch:7700
+            NATS_URL: nats://nats:4222
+            S3_ENDPOINT_URL: http://garage:3900
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            meilisearch:
+                condition: service_started
+            nats:
+                condition: service_started
+            garage:
+                condition: service_started
+        restart: unless-stopped
 
 volumes:
-  postgres_data:
-  redis_data:
-  meilisearch_data:
+    postgres_data:
+    redis_data:
+    meilisearch_data:
+    garage_meta:
+    garage_data:

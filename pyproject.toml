@@ -11,7 +11,7 @@ dependencies = [
     "bcrypt>=5.0.0",
     "fastapi>=0.135.3",
     "httpx>=0.28.1",
-    "meilisearch>=0.40.0",
+    "meilisearch-python-sdk>=4.0.0",
     "nats-py>=2.14.0",
     "psycopg2-binary",
     "pydantic-settings>=2.13.1",
@@ -25,5 +25,18 @@ dependencies = [
 [dependency-groups]
 dev = [
     "black>=26.3.1",
+    "fakeredis>=2.0.0",
     "isort>=8.0.1",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
 ]
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["src/tests"]
+pythonpath = ["."]

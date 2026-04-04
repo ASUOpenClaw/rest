@@ -82,9 +82,9 @@ async def search(
             "folder_id": str(filters.folder_id) if filters.folder_id else None,
             "include_subfolders": filters.include_subfolders,
             "mime_types": filters.mime_types,
-            "file_ids": [str(fid) for fid in filters.file_ids]
-            if filters.file_ids
-            else None,
+            "file_ids": (
+                [str(fid) for fid in filters.file_ids] if filters.file_ids else None
+            ),
         },
     }
 
