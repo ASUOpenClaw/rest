@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     # Frontend (used for OAuth redirects, CORS)
     frontend_url: str = "http://localhost:3000"
 
+    # Logging
+    log_level: str = "INFO"
+
     # Conversation RAG indexing threshold (messages before auto-index)
     rag_index_threshold: int = 20
 

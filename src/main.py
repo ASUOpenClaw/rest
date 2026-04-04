@@ -1,23 +1,23 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.auth import router as auth_router
-from src.api.conversations import router as conversations_router
-from src.api.file_permissions import router as file_permissions_router
-from src.api.files import router as files_router
-from src.api.folders import router as folders_router
-from src.api.rag import router as rag_router
-from src.api.transcribe import router as transcribe_router
-from src.api.workspaces import router as workspaces_router
+from src.api import router
 from src.core.config import settings
+from src.core.logging import configure_logging
+from src.core.middleware import RequestIDMiddleware, unhandled_exception_handler
+from src.services import meili as meili_svc
 from src.services import nats as nats_svc
+
+configure_logging(settings.log_level)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- startup ---
     await nats_svc.connect(settings.nats_url)
+    await meili_svc.init(settings.meilisearch_url, settings.meilisearch_api_key or None)
 
     js = nats_svc.get_js()
     if js is not None:
@@ -30,15 +30,21 @@ async def lifespan(app: FastAPI):
 
     # --- shutdown ---
     await nats_svc.close()
+    await meili_svc.close()
 
 
 app = FastAPI(title="OpenClaw REST API", version="0.1.0", lifespan=lifespan)
 
-app.include_router(auth_router, prefix="/v1")
-app.include_router(workspaces_router, prefix="/v1")
-app.include_router(folders_router, prefix="/v1")
-app.include_router(files_router, prefix="/v1")
-app.include_router(file_permissions_router, prefix="/v1")
-app.include_router(rag_router, prefix="/v1")
-app.include_router(transcribe_router, prefix="/v1")
-app.include_router(conversations_router, prefix="/v1")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.frontend_url],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+)
+app.add_middleware(RequestIDMiddleware)
+
+app.add_exception_handler(Exception, unhandled_exception_handler)
+
+app.include_router(router)
