@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
-from src.core.deps import CurrentAuth
+from src.core.deps import CurrentAnyAuth, CurrentAuth
 from src.schemas.conversation import (
     ConversationListOut,
     ConversationOut,
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/workspaces/{workspace_id}", tags=["conversations"])
 @router.get("/conversations", response_model=ConversationListOut)
 async def list_conversations(
     workspace_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -83,7 +83,7 @@ async def get_conversation(
 async def list_messages(
     workspace_id: uuid.UUID,
     conversation_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),

@@ -18,15 +18,17 @@ FastAPI dependency chain:
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, Header, HTTPException, Security, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import settings
 from src.core.db import get_db
 from src.core.security import decode_token, verify_api_key
 from src.models import (
@@ -188,6 +190,69 @@ async def get_current_user(
 
 # Convenience alias used in route signatures
 CurrentAuth = Annotated[_AuthContext, Depends(get_current_user)]
+
+
+# ---------------------------------------------------------------------------
+# Service auth (MCP service calling on behalf of a user)
+# ---------------------------------------------------------------------------
+
+
+_service_key_header = APIKeyHeader(name="X-Service-Key", auto_error=False)
+
+
+async def get_current_user_or_service(
+    bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    api_key: Annotated[str | None, Security(_api_key_header)],
+    service_key: Annotated[str | None, Security(_service_key_header)],
+    x_on_behalf_of_user: Annotated[
+        str | None, Header(alias="x-on-behalf-of-user")
+    ] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
+) -> _AuthContext:
+    # Service key path: trusted service acting on behalf of a user
+    if service_key is not None:
+        if not settings.mcp_service_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Service auth not configured",
+            )
+        if not secrets.compare_digest(service_key, settings.mcp_service_key):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid service key"
+            )
+        if not x_on_behalf_of_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing X-On-Behalf-Of-User header",
+            )
+        try:
+            user_id = uuid.UUID(x_on_behalf_of_user)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid X-On-Behalf-Of-User value",
+            )
+        user = await db.get(User, user_id)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found"
+            )
+        return _AuthContext(user=user)
+
+    # Standard user auth paths
+    if bearer is not None:
+        return await _resolve_jwt(bearer.credentials, db)
+    if api_key is not None:
+        return await _resolve_api_key(api_key, db)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+# Union auth: accepts both human users and the MCP service
+CurrentAnyAuth = Annotated[_AuthContext, Depends(get_current_user_or_service)]
 
 
 # ---------------------------------------------------------------------------

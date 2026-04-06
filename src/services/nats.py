@@ -100,6 +100,7 @@ async def publish_index_job(
     s3_key: str | None = None,
     mime_type: str | None = None,
     original_name: str | None = None,
+    folder_id: str | None = None,
     metadata: dict | None = None,
 ) -> None:
     payload: dict[str, Any] = {
@@ -114,6 +115,8 @@ async def publish_index_job(
         payload["mime_type"] = mime_type
     if original_name is not None:
         payload["original_name"] = original_name
+    if folder_id is not None:
+        payload["folder_id"] = folder_id
     if metadata is not None:
         payload["metadata"] = metadata
     await publish("indexing.jobs", payload)

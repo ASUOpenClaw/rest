@@ -190,6 +190,7 @@ async def upload_file(
             s3_key=s3_key,
             mime_type=mime_type,
             original_name=filename,
+            folder_id=str(folder_id) if folder_id else None,
         )
 
     await meili.index_file(
@@ -460,6 +461,7 @@ async def reindex_file(
         s3_key=file.s3_key,
         mime_type=file.mime_type,
         original_name=file.original_name,
+        folder_id=str(file.folder_id) if file.folder_id else None,
     )
 
     return {

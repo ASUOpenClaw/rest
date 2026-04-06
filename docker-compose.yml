@@ -43,6 +43,13 @@ services:
         ports:
             - "4222:4222"
 
+    qdrant:
+        image: qdrant/qdrant:v1.9.4
+        ports:
+            - "6333:6333"
+        volumes:
+            - qdrant_data:/qdrant/storage
+
     garage:
         image: dxflrs/garage:v1.0.1
         ports:
@@ -73,6 +80,49 @@ services:
         profiles:
             - test
 
+    rag:
+        build: ../rag
+        ports:
+            - "8001:8001"
+        environment:
+            RAG_QDRANT_URL: http://qdrant:6333
+            RAG_QDRANT_COLLECTION: chunks
+            RAG_EMBEDDING_MODEL: BAAI/bge-m3
+            RAG_HOST: 0.0.0.0
+            RAG_PORT: "8001"
+        depends_on:
+            - qdrant
+        restart: unless-stopped
+
+    parser:
+        build: ../parser
+        environment:
+            PARSER_NATS_URL: nats://nats:4222
+            PARSER_S3_ENDPOINT: http://garage:3900
+            PARSER_QDRANT_URL: http://qdrant:6333
+            PARSER_EMBEDDING_MODEL: BAAI/bge-m3
+        env_file: .env
+        depends_on:
+            - nats
+            - qdrant
+            - garage
+        restart: unless-stopped
+
+    mcp:
+        build: ../mcp
+        ports:
+            - "8002:8002"
+        environment:
+            MCP_REST_URL: http://api:8000
+            MCP_REDIS_URL: redis://redis:6379/0
+            MCP_HOST: 0.0.0.0
+            MCP_PORT: "8002"
+        env_file: .env
+        depends_on:
+            - api
+            - redis
+        restart: unless-stopped
+
     api:
         build: .
         ports:
@@ -84,6 +134,7 @@ services:
             MEILISEARCH_URL: http://meilisearch:7700
             NATS_URL: nats://nats:4222
             S3_ENDPOINT_URL: http://garage:3900
+            RAG_SERVICE_URL: http://rag:8001
         depends_on:
             postgres:
                 condition: service_healthy
@@ -95,6 +146,8 @@ services:
                 condition: service_started
             garage:
                 condition: service_started
+            qdrant:
+                condition: service_started
         restart: unless-stopped
 
 volumes:
@@ -103,3 +156,4 @@ volumes:
     meilisearch_data:
     garage_meta:
     garage_data:
+    qdrant_data:

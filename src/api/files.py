@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
-from src.core.deps import CurrentAuth
+from src.core.deps import CurrentAnyAuth, CurrentAuth
 from src.schemas.file import (
     DownloadUrlOut,
     FileListOut,
@@ -44,7 +44,7 @@ async def upload_file(
 @router.get("", response_model=FileListOut)
 async def list_files(
     workspace_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
     folder_id: uuid.UUID | None = Query(default=None),
@@ -85,7 +85,7 @@ async def list_files(
 async def get_file(
     workspace_id: uuid.UUID,
     file_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     db: AsyncSession = Depends(get_db),
 ):
     return await file_svc.get_file(
@@ -117,7 +117,7 @@ async def update_file(
 async def get_download_url(
     workspace_id: uuid.UUID,
     file_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     expires_in: int = Query(default=3600, ge=60, le=86400),
     db: AsyncSession = Depends(get_db),
 ):

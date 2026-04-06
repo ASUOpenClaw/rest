@@ -62,5 +62,8 @@ class Settings(BaseSettings):
     # Conversation RAG indexing threshold (messages before auto-index)
     rag_index_threshold: int = 20
 
+    # MCP service shared secret (used by mcp/ service to call REST API on behalf of users)
+    mcp_service_key: str = ""
+
 
 settings = Settings()

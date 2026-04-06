@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
-from src.core.deps import CurrentAuth
+from src.core.deps import CurrentAnyAuth
 from src.models import WorkspaceMember
 from src.schemas.rag import RagIssuesOut, RagSearchOut, RagSearchRequest, RagStatusOut
 from src.services import rag_client
@@ -32,7 +32,7 @@ async def _require_member(
 async def rag_search(
     workspace_id: uuid.UUID,
     body: RagSearchRequest,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     db: AsyncSession = Depends(get_db),
 ):
     return await rag_client.search(

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
-from src.core.deps import CurrentAuth
+from src.core.deps import CurrentAnyAuth, CurrentAuth
 from src.schemas.folder import (
     FolderCreateRequest,
     FolderDetailOut,
@@ -50,7 +50,7 @@ async def get_folder_tree(
 @router.get("", response_model=FolderListOut)
 async def list_folders(
     workspace_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     parent_id: uuid.UUID | None = Query(default=None),
     recursive: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
