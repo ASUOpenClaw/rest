@@ -51,7 +51,7 @@ def create_access_token(user_id: uuid.UUID) -> tuple[str, str]:
             (now + timedelta(minutes=settings.access_token_expire_minutes)).timestamp()
         ),
     }
-    token = jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+    token = jwt.encode(payload, settings.jwt_private_key, algorithm=settings.algorithm)
     return token, jti
 
 
@@ -68,7 +68,7 @@ def create_refresh_token(user_id: uuid.UUID) -> tuple[str, str]:
             (now + timedelta(days=settings.refresh_token_expire_days)).timestamp()
         ),
     }
-    token = jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+    token = jwt.encode(payload, settings.jwt_private_key, algorithm=settings.algorithm)
     return token, jti
 
 
@@ -77,7 +77,7 @@ def decode_token(token: str) -> dict:
     Decode and validate a JWT.
     Raises jose.JWTError on any validation failure.
     """
-    return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    return jwt.decode(token, settings.jwt_public_key, algorithms=[settings.algorithm])
 
 
 def redis_refresh_key(user_id: str | uuid.UUID, jti: str) -> str:

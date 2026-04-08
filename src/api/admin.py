@@ -1,14 +1,16 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
 from src.core.deps import CurrentAuth
 from src.core.redis import get_redis
-from src.models import Workspace, WorkspaceMember, WorkspaceRole
+from src.models import File, Workspace, WorkspaceMember, WorkspaceRole
+from src.models.file import IndexingStatus
 from src.services import goclaw_client, workspace as ws_svc
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -19,6 +21,35 @@ def _require_owner(auth):
     admin endpoints are global). For now we trust any authenticated user;
     tighten with a superuser flag on User when needed."""
     pass
+
+
+@router.get("/files/stuck")
+async def list_stuck_files(
+    auth: CurrentAuth,
+    older_than_minutes: int = Query(default=10, ge=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """List files stuck in 'processing' state — likely due to Parser crash.
+    Recovery: POST /workspaces/{ws}/files/{id}/reindex on each returned file.
+    """
+    cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
+    result = await db.execute(
+        select(File).where(
+            File.indexing_status == IndexingStatus.processing,
+            File.updated_at < cutoff,
+        )
+    )
+    files = result.scalars().all()
+    return [
+        {
+            "id": str(f.id),
+            "workspace_id": str(f.workspace_id),
+            "original_name": f.original_name,
+            "updated_at": f.updated_at,
+            "reindex_url": f"/v1/workspaces/{f.workspace_id}/files/{f.id}/reindex",
+        }
+        for f in files
+    ]
 
 
 @router.get("/workspaces/unprovisioned")

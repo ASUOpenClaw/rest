@@ -382,11 +382,14 @@ async def delete_file(
 
     s3_key = file.s3_key
 
+    # Delete from S3 first — if this fails, the DB row remains intact and
+    # the caller can retry. Inverse (DB gone, S3 orphaned) is unrecoverable.
+    await s3_svc.delete_object(s3_key)
+
     await db.delete(file)
     await db.commit()
 
-    # Delete from S3 and notify indexer (best-effort)
-    await s3_svc.delete_object(s3_key)
+    # Notify indexer to remove Qdrant chunks (best-effort).
     await nats_svc.publish_index_job(
         job_id=str(uuid.uuid4()),
         job_type="delete",

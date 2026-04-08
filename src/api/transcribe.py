@@ -13,7 +13,7 @@ router = APIRouter(
 )
 
 
-@router.post("", response_model=TranscriptionTaskOut)
+@router.post("", response_model=TranscriptionTaskOut, status_code=202)
 async def transcribe(
     workspace_id: uuid.UUID,
     body: TranscriptionRequest,
@@ -21,10 +21,11 @@ async def transcribe(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Transcribe an already-uploaded audio/video file via Speaches (Whisper).
-    Synchronous — returns the full result when transcription is done.
+    Enqueue transcription of an uploaded audio/video file via Speaches (Whisper).
+    Returns 202 immediately with task_id and status='processing'.
+    Poll GET /{task_id} until status is 'completed' or 'failed'.
     """
-    task = await transcription_svc.transcribe(
+    task = await transcription_svc.enqueue(
         workspace_id=workspace_id,
         user_id=auth.user.id,
         file_id=body.file_id,

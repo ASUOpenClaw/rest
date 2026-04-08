@@ -11,9 +11,13 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # JWT
-    secret_key: str
-    algorithm: str = "HS256"
+    # JWT — RS256
+    # Generate: openssl genrsa -out jwt_private.pem 2048
+    #           openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
+    # Set JWT_PRIVATE_KEY / JWT_PUBLIC_KEY to PEM file contents (newlines preserved).
+    jwt_private_key: str  # RSA private key PEM — REST only (signing)
+    jwt_public_key: str   # RSA public key PEM  — REST + Shell (verification)
+    algorithm: str = "RS256"
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 30
 
