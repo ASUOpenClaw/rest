@@ -10,8 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import AsyncSessionLocal
-from src.models import File, TranscriptionTask, WorkspaceMember, WorkspaceRole
+from src.models import File, Transcription, TranscriptionTask, WorkspaceMember, WorkspaceRole
+from src.models.file import IndexingStatus
 from src.models.transcription import TranscriptionStatus
+from src.services import nats as nats_svc
 from src.services import s3 as s3_svc
 from src.services import speaches_client
 
@@ -70,13 +72,26 @@ async def enqueue(
     await db.refresh(task)
 
     asyncio.create_task(
-        _run_transcription(task.id, file.s3_key, file.original_name, file.mime_type, language, include_timestamps)
+        _run_transcription(
+            task_id=task.id,
+            workspace_id=workspace_id,
+            audio_file_id=file_id,
+            requested_by=user_id,
+            s3_key=file.s3_key,
+            filename=file.original_name,
+            mime_type=file.mime_type,
+            language=language,
+            include_timestamps=include_timestamps,
+        )
     )
     return task
 
 
 async def _run_transcription(
     task_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    audio_file_id: uuid.UUID,
+    requested_by: uuid.UUID | None,
     s3_key: str,
     filename: str,
     mime_type: str,
@@ -100,10 +115,55 @@ async def _run_transcription(
                 include_timestamps=include_timestamps,
             )
             elapsed = (datetime.now(UTC) - started_at).total_seconds()
+
+            # Save transcript text as a workspace File so it's RAG-indexed.
+            transcript_text = result.get("text", "")
+            transcript_filename = f"{filename.rsplit('.', 1)[0]}_transcript.txt"
+            transcript_s3_key = f"{workspace_id}/transcriptions/{task_id}.txt"
+            transcript_bytes = transcript_text.encode("utf-8")
+
+            await s3_svc.upload_bytes(transcript_bytes, transcript_s3_key, "text/plain")
+
+            transcript_file = File(
+                workspace_id=workspace_id,
+                original_name=transcript_filename,
+                mime_type="text/plain",
+                size_bytes=len(transcript_bytes),
+                s3_key=transcript_s3_key,
+                uploaded_by=requested_by,
+                indexing_status=IndexingStatus.pending,
+            )
+            db.add(transcript_file)
+            await db.flush()  # get transcript_file.id
+
+            await nats_svc.publish_index_job(
+                job_id=str(uuid.uuid4()),
+                job_type="index",
+                workspace_id=str(workspace_id),
+                file_id=str(transcript_file.id),
+                s3_key=transcript_s3_key,
+                mime_type="text/plain",
+                original_name=transcript_filename,
+            )
+
+            # Create Transcription record linking audio ↔ transcript files.
+            transcription = Transcription(
+                workspace_id=workspace_id,
+                created_by=requested_by,
+                task_id=task_id,
+                audio_file_id=audio_file_id,
+                transcript_file_id=transcript_file.id,
+                language=result.get("language") or language,
+            )
+            db.add(transcription)
+            await db.flush()  # get transcription.id
+
             task.status = TranscriptionStatus.completed
             task.result = result
             task.processing_time_sec = elapsed
             task.completed_at = datetime.now(UTC)
+            task.transcription_id = transcription.id
+
         except Exception as exc:
             logger.error("transcription task %s failed: %s", task_id, exc)
             task.status = TranscriptionStatus.failed

@@ -6,7 +6,7 @@ from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base, UUIDMixin
+from .base import Base, TimestampMixin, UUIDMixin
 
 
 class TranscriptionStatus(str, enum.Enum):
@@ -14,6 +14,42 @@ class TranscriptionStatus(str, enum.Enum):
     processing = "processing"
     completed = "completed"
     failed = "failed"
+
+
+class Transcription(Base, UUIDMixin, TimestampMixin):
+    """Finished transcription — links original audio file to transcript text file."""
+
+    __tablename__ = "transcriptions"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("transcription_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    audio_file_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transcript_file_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("files.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class TranscriptionTask(Base, UUIDMixin):
@@ -45,6 +81,12 @@ class TranscriptionTask(Base, UUIDMixin):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     processing_time_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Set after successful completion — points to the Transcription record.
+    transcription_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("transcriptions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

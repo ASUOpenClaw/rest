@@ -5,7 +5,7 @@ from .file import File, FileSecurityMode, IndexingStatus
 from .file_permission import FilePermission, FilePermissionLevel
 from .folder import Folder
 from .oauth import OAuthAccount, OAuthProvider
-from .transcription import TranscriptionStatus, TranscriptionTask
+from .transcription import Transcription, TranscriptionStatus, TranscriptionTask
 from .user import User
 from .workspace import Workspace, WorkspaceInvite, WorkspaceMember, WorkspaceRole
 
@@ -25,6 +25,7 @@ __all__ = [
     "FileSecurityMode",
     "FilePermission",
     "FilePermissionLevel",
+    "Transcription",
     "TranscriptionTask",
     "TranscriptionStatus",
     "Conversation",

@@ -8,6 +8,7 @@ from src.api.files import router as files_router
 from src.api.folders import router as folders_router
 from src.api.rag import router as rag_router
 from src.api.transcribe import router as transcribe_router
+from src.api.transcriptions import router as transcriptions_router
 from src.api.workspaces import router as workspaces_router
 
 router = APIRouter(prefix="/v1")
@@ -20,4 +21,5 @@ router.include_router(files_router)
 router.include_router(file_permissions_router)
 router.include_router(rag_router)
 router.include_router(transcribe_router)
+router.include_router(transcriptions_router)
 router.include_router(conversations_router)
