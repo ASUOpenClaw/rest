@@ -23,7 +23,7 @@ _SENTINEL = object()  # used to detect whether folder_id was explicitly passed
 @router.post("", response_model=FileOut, status_code=status.HTTP_201_CREATED)
 async def upload_file(
     workspace_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     file: UploadFile = File(...),
     folder_id: uuid.UUID | None = Form(default=None),
     description: str | None = Form(default=None),

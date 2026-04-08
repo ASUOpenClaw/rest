@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import redis.asyncio as aioredis
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import settings
 from src.models import (
     File,
     User,
@@ -17,7 +21,9 @@ from src.models import (
     WorkspaceRole,
 )
 from src.schemas.workspace import WorkspaceStats
-from src.services import meili
+from src.services import goclaw_client, meili
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Role helpers (mirrors deps.py, kept local to avoid circular imports)
@@ -72,6 +78,7 @@ async def create_workspace(
     system_prompt: str | None,
     config: dict,
     db: AsyncSession,
+    redis: aioredis.Redis | None = None,
 ) -> tuple[Workspace, WorkspaceStats]:
     ws = Workspace(
         name=name,
@@ -91,6 +98,27 @@ async def create_workspace(
     db.add(member)
     await db.commit()
     await db.refresh(ws)
+
+    # Provision GoClaw tenant + API key + agent for this workspace.
+    if settings.goclaw_gateway_url and settings.goclaw_gateway_token:
+        try:
+            goclaw = await goclaw_client.provision_workspace(str(ws.id), ws.name)
+            ws.config = {**(ws.config or {}), **goclaw}
+            await db.commit()
+            await db.refresh(ws)
+            if redis is not None:
+                await redis.setex(
+                    f"ws_creds:{ws.id}",
+                    3600,
+                    json.dumps({
+                        "api_key": goclaw["goclaw_api_key"],
+                        "agent_id": goclaw["goclaw_agent_id"],
+                    }),
+                )
+        except Exception as exc:
+            logger.error("GoClaw provisioning failed for workspace %s: %s", ws.id, exc)
+            # Non-fatal: workspace is created, GoClaw can be provisioned manually.
+
     await meili.index_workspace(str(ws.id), ws.name, ws.description)
     stats = await _compute_stats(ws.id, db)
     return ws, stats
@@ -221,6 +249,14 @@ async def delete_workspace(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found"
         )
+
+    # Best-effort: delete GoClaw tenant before removing from DB.
+    tenant_id = (ws.config or {}).get("goclaw_tenant_id")
+    if tenant_id and settings.goclaw_gateway_url and settings.goclaw_gateway_token:
+        try:
+            await goclaw_client.delete_tenant(tenant_id)
+        except Exception as exc:
+            logger.error("GoClaw tenant deletion failed for workspace %s: %s", workspace_id, exc)
 
     await db.delete(ws)
     await db.commit()

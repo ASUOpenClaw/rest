@@ -1,10 +1,12 @@
 import uuid
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
 from src.core.deps import CurrentAuth
+from src.core.redis import get_redis
 from src.schemas.workspace import (
     InviteCreateRequest,
     InviteOut,
@@ -49,6 +51,7 @@ async def create_workspace(
     body: WorkspaceCreateRequest,
     auth: CurrentAuth,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ):
     ws, stats = await ws_svc.create_workspace(
         user=auth.user,
@@ -57,6 +60,7 @@ async def create_workspace(
         system_prompt=body.system_prompt,
         config=body.config,
         db=db,
+        redis=redis,
     )
     return _ws_out(ws, stats)
 

@@ -50,8 +50,17 @@ class Settings(BaseSettings):
     speaches_model: str = "Systran/faster-whisper-large-v3"
     speaches_timeout_seconds: int = 300  # audio can be long
 
-    # OpenClaw gateway (OpenAI-compatible proxy)
+    # OpenAI-compatible proxy (used by openai proxy endpoint, not main chat flow)
     openai_gateway_url: str = "http://localhost:8080"
+
+    # GoClaw gateway (admin provisioning API)
+    goclaw_gateway_url: str = ""
+    goclaw_gateway_token: str = ""
+    # LiteLLM base URL as seen by GoClaw (internal network, e.g. http://litellm:4000/v1)
+    goclaw_litellm_url: str = ""
+    goclaw_litellm_api_key: str = ""
+    # MCP server URL as seen by GoClaw (e.g. http://machine2:8002)
+    goclaw_mcp_url: str = ""
 
     # Frontend (used for OAuth redirects, CORS)
     frontend_url: str = "http://localhost:3000"
