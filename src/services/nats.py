@@ -37,6 +37,12 @@ _STREAMS: list[StreamConfig] = [
         retention=RetentionPolicy.LIMITS,
         storage=StorageType.FILE,
     ),
+    StreamConfig(
+        name="TRANSCRIPTION",
+        subjects=["transcription.*"],
+        retention=RetentionPolicy.LIMITS,
+        storage=StorageType.FILE,
+    ),
 ]
 
 
@@ -120,3 +126,30 @@ async def publish_index_job(
     if metadata is not None:
         payload["metadata"] = metadata
     await publish("indexing.jobs", payload)
+
+
+async def publish_transcription_job(
+    *,
+    job_id: str,
+    task_id: str,
+    workspace_id: str,
+    audio_file_id: str,
+    s3_key: str,
+    filename: str,
+    mime_type: str,
+    language: str | None,
+    include_timestamps: bool,
+    requested_by: str | None,
+) -> None:
+    await publish("transcription.jobs", {
+        "job_id": job_id,
+        "task_id": task_id,
+        "workspace_id": workspace_id,
+        "audio_file_id": audio_file_id,
+        "s3_key": s3_key,
+        "filename": filename,
+        "mime_type": mime_type,
+        "language": language,
+        "include_timestamps": include_timestamps,
+        "requested_by": requested_by,
+    })
