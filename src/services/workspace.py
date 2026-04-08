@@ -228,6 +228,7 @@ async def delete_workspace(
     workspace_id: uuid.UUID,
     user: User,
     db: AsyncSession,
+    redis: aioredis.Redis | None = None,
 ) -> None:
     member = await db.scalar(
         select(WorkspaceMember).where(
@@ -261,6 +262,8 @@ async def delete_workspace(
     await db.delete(ws)
     await db.commit()
     await meili.delete_workspace(str(workspace_id))
+    if redis is not None:
+        await redis.delete(f"ws_creds:{workspace_id}")
 
 
 # ---------------------------------------------------------------------------

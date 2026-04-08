@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     # GoClaw gateway (admin provisioning API)
     goclaw_gateway_url: str = ""
     goclaw_gateway_token: str = ""
+    goclaw_default_model: str = "qwen3-14b"
     # LiteLLM base URL as seen by GoClaw (internal network, e.g. http://litellm:4000/v1)
     goclaw_litellm_url: str = ""
     goclaw_litellm_api_key: str = ""

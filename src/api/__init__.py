@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from src.api.admin import router as admin_router
 from src.api.auth import router as auth_router
 from src.api.conversations import router as conversations_router
 from src.api.file_permissions import router as file_permissions_router
@@ -11,6 +12,7 @@ from src.api.workspaces import router as workspaces_router
 
 router = APIRouter(prefix="/v1")
 
+router.include_router(admin_router)
 router.include_router(auth_router)
 router.include_router(workspaces_router)
 router.include_router(folders_router)

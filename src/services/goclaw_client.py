@@ -72,7 +72,7 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
             json={
                 "name": ws_name,
                 "key": slug,
-                "model": "qwen3-14b",
+                "model": settings.goclaw_default_model,
                 "provider": "litellm",
             },
         )

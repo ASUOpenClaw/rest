@@ -131,8 +131,9 @@ async def delete_workspace(
     workspace_id: uuid.UUID,
     auth: CurrentAuth,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ):
-    await ws_svc.delete_workspace(workspace_id=workspace_id, user=auth.user, db=db)
+    await ws_svc.delete_workspace(workspace_id=workspace_id, user=auth.user, db=db, redis=redis)
 
 
 # ---------------------------------------------------------------------------
