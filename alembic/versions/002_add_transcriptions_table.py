@@ -1,7 +1,7 @@
 """add_transcriptions_table
 
-Revision ID: bc680e263f79
-Revises: 4a04b7cf85dc
+Revision ID: 002
+Revises: 001
 Create Date: 2026-04-09
 
 """
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "bc680e263f79"
-down_revision: Union[str, Sequence[str], None] = "4a04b7cf85dc"
+revision: str = "002"
+down_revision: Union[str, Sequence[str], None] = "001"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
