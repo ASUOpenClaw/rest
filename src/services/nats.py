@@ -141,15 +141,18 @@ async def publish_transcription_job(
     include_timestamps: bool,
     requested_by: str | None,
 ) -> None:
-    await publish("transcription.jobs", {
-        "job_id": job_id,
-        "task_id": task_id,
-        "workspace_id": workspace_id,
-        "audio_file_id": audio_file_id,
-        "s3_key": s3_key,
-        "filename": filename,
-        "mime_type": mime_type,
-        "language": language,
-        "include_timestamps": include_timestamps,
-        "requested_by": requested_by,
-    })
+    await publish(
+        "transcription.jobs",
+        {
+            "job_id": job_id,
+            "task_id": task_id,
+            "workspace_id": workspace_id,
+            "audio_file_id": audio_file_id,
+            "s3_key": s3_key,
+            "filename": filename,
+            "mime_type": mime_type,
+            "language": language,
+            "include_timestamps": include_timestamps,
+            "requested_by": requested_by,
+        },
+    )

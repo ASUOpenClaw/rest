@@ -110,10 +110,12 @@ async def create_workspace(
                 await redis.setex(
                     f"ws_creds:{ws.id}",
                     3600,
-                    json.dumps({
-                        "api_key": goclaw["goclaw_api_key"],
-                        "agent_id": goclaw["goclaw_agent_id"],
-                    }),
+                    json.dumps(
+                        {
+                            "api_key": goclaw["goclaw_api_key"],
+                            "agent_id": goclaw["goclaw_agent_id"],
+                        }
+                    ),
                 )
         except Exception as exc:
             logger.error("GoClaw provisioning failed for workspace %s: %s", ws.id, exc)
@@ -257,7 +259,9 @@ async def delete_workspace(
         try:
             await goclaw_client.delete_tenant(tenant_id)
         except Exception as exc:
-            logger.error("GoClaw tenant deletion failed for workspace %s: %s", workspace_id, exc)
+            logger.error(
+                "GoClaw tenant deletion failed for workspace %s: %s", workspace_id, exc
+            )
 
     await db.delete(ws)
     await db.commit()

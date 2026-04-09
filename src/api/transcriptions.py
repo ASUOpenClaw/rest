@@ -50,11 +50,17 @@ async def list_transcriptions(
     )
     if member is None:
         from fastapi import HTTPException, status
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member")
 
-    total = await db.scalar(
-        select(func.count()).where(Transcription.workspace_id == workspace_id)
-    ) or 0
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+        )
+
+    total = (
+        await db.scalar(
+            select(func.count()).where(Transcription.workspace_id == workspace_id)
+        )
+        or 0
+    )
 
     result = await db.execute(
         select(Transcription)
@@ -86,7 +92,9 @@ async def get_transcription_record(
         )
     )
     if member is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+        )
 
     t = await db.scalar(
         select(Transcription).where(
@@ -95,6 +103,8 @@ async def get_transcription_record(
         )
     )
     if t is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcription not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Transcription not found"
+        )
 
     return await _transcription_out(t, db)

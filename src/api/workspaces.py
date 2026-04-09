@@ -133,7 +133,9 @@ async def delete_workspace(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    await ws_svc.delete_workspace(workspace_id=workspace_id, user=auth.user, db=db, redis=redis)
+    await ws_svc.delete_workspace(
+        workspace_id=workspace_id, user=auth.user, db=db, redis=redis
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +237,250 @@ async def create_invite(
         db=db,
     )
     return InviteOut.model_validate(invite)
+
+
+# ---------------------------------------------------------------------------
+# Skills (per-workspace instruction files stored in S3, injected at session start)
+# ---------------------------------------------------------------------------
+
+
+async def _require_ws_member(
+    workspace_id: uuid.UUID, auth, db: AsyncSession, min_role=None
+):
+    """Check workspace membership + optional min_role. Returns WorkspaceMember."""
+    from fastapi import HTTPException
+    from fastapi import status as http_status
+    from sqlalchemy import select as sa_select
+
+    from src.models import WorkspaceMember, WorkspaceRole
+
+    member = await db.scalar(
+        sa_select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == auth.user.id,
+        )
+    )
+    if member is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+        )
+
+    if min_role:
+        _ORDER = [
+            WorkspaceRole.guest,
+            WorkspaceRole.member,
+            WorkspaceRole.admin,
+            WorkspaceRole.owner,
+        ]
+        if _ORDER.index(member.role) < _ORDER.index(min_role):
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN, detail="Requires admin role"
+            )
+    return member
+
+
+@router.get("/{workspace_id}/skills")
+async def list_workspace_skills(
+    workspace_id: uuid.UUID,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """List skill names stored for this workspace."""
+    from src.services.workspace_skills import list_skills
+
+    await _require_ws_member(workspace_id, auth, db)
+    return {"skills": await list_skills(str(workspace_id))}
+
+
+@router.get("/{workspace_id}/skills/{name}")
+async def get_workspace_skill(
+    workspace_id: uuid.UUID,
+    name: str,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the markdown content of a skill."""
+    from src.services.workspace_skills import get_skill
+
+    await _require_ws_member(workspace_id, auth, db)
+    content = await get_skill(str(workspace_id), name)
+    return {"name": name, "content": content}
+
+
+@router.put("/{workspace_id}/skills/{name}", status_code=status.HTTP_204_NO_CONTENT)
+async def put_workspace_skill(
+    workspace_id: uuid.UUID,
+    name: str,
+    body: dict,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    """Create or replace a skill. Body: {"content": "...markdown..."}. Requires admin/owner."""
+    from src.models import WorkspaceRole
+    from src.services.workspace_skills import put_skill
+
+    await _require_ws_member(workspace_id, auth, db, min_role=WorkspaceRole.admin)
+    content = body.get("content", "")
+    if not content:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="content is required",
+        )
+    await put_skill(str(workspace_id), name, content, redis)
+
+
+@router.delete("/{workspace_id}/skills/{name}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_workspace_skill(
+    workspace_id: uuid.UUID,
+    name: str,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    """Delete a skill. Requires admin/owner."""
+    from src.models import WorkspaceRole
+    from src.services.workspace_skills import delete_skill
+
+    await _require_ws_member(workspace_id, auth, db, min_role=WorkspaceRole.admin)
+    await delete_skill(str(workspace_id), name, redis)
+
+
+# ---------------------------------------------------------------------------
+# Plugins (external MCP servers registered per-workspace)
+# ---------------------------------------------------------------------------
+# Stored in workspace.config["plugins"] = [{id, name, url, transport, tool_prefix, goclaw_mcp_server_id}]
+
+
+async def _get_ws_with_creds(
+    workspace_id: uuid.UUID, auth, db: AsyncSession, min_role=None
+):
+    """Load workspace + check membership + return (ws, api_key, agent_id)."""
+    from src.models import Workspace
+
+    member = await _require_ws_member(workspace_id, auth, db, min_role=min_role)
+    ws = await db.get(Workspace, workspace_id)
+    if ws is None:
+        from fastapi import HTTPException
+        from fastapi import status as s
+
+        raise HTTPException(
+            status_code=s.HTTP_404_NOT_FOUND, detail="Workspace not found"
+        )
+    cfg = ws.config or {}
+    api_key = cfg.get("goclaw_api_key")
+    agent_id = cfg.get("goclaw_agent_id")
+    if not api_key or not agent_id:
+        from fastapi import HTTPException
+        from fastapi import status as s
+
+        raise HTTPException(
+            status_code=s.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Workspace not provisioned in GoClaw",
+        )
+    return ws, api_key, agent_id
+
+
+@router.get("/{workspace_id}/plugins")
+async def list_workspace_plugins(
+    workspace_id: uuid.UUID,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """List external MCP server plugins for this workspace."""
+    ws, _, _ = await _get_ws_with_creds(workspace_id, auth, db)
+    return {"plugins": (ws.config or {}).get("plugins", [])}
+
+
+@router.post("/{workspace_id}/plugins", status_code=status.HTTP_201_CREATED)
+async def add_workspace_plugin(
+    workspace_id: uuid.UUID,
+    body: dict,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Register an external MCP server as a plugin. Requires admin/owner.
+    Body: {name, url, transport="streamable-http", tool_prefix?}
+    """
+    import uuid as uuid_mod
+
+    from src.models import WorkspaceRole
+    from src.services import goclaw_client
+
+    ws, api_key, agent_id = await _get_ws_with_creds(
+        workspace_id, auth, db, min_role=WorkspaceRole.admin
+    )
+
+    name = body.get("name", "").strip()
+    url = body.get("url", "").strip()
+    if not name or not url:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="name and url are required",
+        )
+
+    transport = body.get("transport", "streamable-http")
+    tool_prefix = body.get("tool_prefix") or None
+
+    mcp_server_id = await goclaw_client.register_plugin(
+        api_key, agent_id, name, url, transport, tool_prefix
+    )
+
+    plugin = {
+        "id": str(uuid_mod.uuid4()),
+        "name": name,
+        "url": url,
+        "transport": transport,
+        "tool_prefix": tool_prefix,
+        "goclaw_mcp_server_id": mcp_server_id,
+    }
+    config = dict(ws.config or {})
+    plugins = list(config.get("plugins", []))
+    plugins.append(plugin)
+    config["plugins"] = plugins
+    ws.config = config
+    await db.commit()
+    return plugin
+
+
+@router.delete(
+    "/{workspace_id}/plugins/{plugin_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def remove_workspace_plugin(
+    workspace_id: uuid.UUID,
+    plugin_id: str,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Unregister an external MCP server plugin. Requires admin/owner."""
+    from src.models import WorkspaceRole
+    from src.services import goclaw_client
+
+    ws, api_key, agent_id = await _get_ws_with_creds(
+        workspace_id, auth, db, min_role=WorkspaceRole.admin
+    )
+
+    config = dict(ws.config or {})
+    plugins = list(config.get("plugins", []))
+    plugin = next((p for p in plugins if p["id"] == plugin_id), None)
+    if plugin is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Plugin not found"
+        )
+
+    await goclaw_client.unregister_plugin(
+        api_key, agent_id, plugin["goclaw_mcp_server_id"]
+    )
+    config["plugins"] = [p for p in plugins if p["id"] != plugin_id]
+    ws.config = config
+    await db.commit()
 
 
 @router.post("/join", response_model=WorkspaceOut)

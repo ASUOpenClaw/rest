@@ -41,15 +41,21 @@ async def enqueue(
         )
     )
     if member is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+        )
     if not _role_gte(member.role, WorkspaceRole.member):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Requires member role")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Requires member role"
+        )
 
     file = await db.scalar(
         select(File).where(File.id == file_id, File.workspace_id == workspace_id)
     )
     if file is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="File not found"
+        )
 
     task = TranscriptionTask(
         workspace_id=workspace_id,

@@ -48,6 +48,7 @@ async def delete_object(s3_key: str) -> None:
 
 async def upload_bytes(data: bytes, s3_key: str, content_type: str) -> None:
     import io
+
     async with _client() as s3:
         await s3.upload_fileobj(
             io.BytesIO(data),
@@ -70,3 +71,10 @@ async def object_exists(s3_key: str) -> bool:
             return True
         except ClientError:
             return False
+
+
+async def list_objects_prefix(prefix: str) -> list[str]:
+    """Return all S3 keys under prefix (no pagination needed for small sets like skills)."""
+    async with _client() as s3:
+        resp = await s3.list_objects_v2(Bucket=settings.s3_bucket, Prefix=prefix)
+        return [obj["Key"] for obj in resp.get("Contents", [])]

@@ -43,7 +43,8 @@ async def lifespan(app: FastAPI):
 
     js = nats_svc.get_js()
     if js is not None:
-        from src.subscribers import conversation, indexing, transcription as transcription_sub
+        from src.subscribers import conversation, indexing
+        from src.subscribers import transcription as transcription_sub
 
         await indexing.start(js)
         await conversation.start(js)

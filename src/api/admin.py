@@ -11,7 +11,8 @@ from src.core.deps import CurrentAuth
 from src.core.redis import get_redis
 from src.models import File, Workspace, WorkspaceMember, WorkspaceRole
 from src.models.file import IndexingStatus
-from src.services import goclaw_client, workspace as ws_svc
+from src.services import goclaw_client
+from src.services import workspace as ws_svc
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -66,7 +67,41 @@ async def list_unprovisioned(
         )
     )
     workspaces = result.scalars().all()
-    return [{"id": str(ws.id), "name": ws.name, "created_at": ws.created_at} for ws in workspaces]
+    return [
+        {"id": str(ws.id), "name": ws.name, "created_at": ws.created_at}
+        for ws in workspaces
+    ]
+
+
+@router.get("/skills")
+async def list_catalog_skills(auth: CurrentAuth):
+    """List all skills available in the GoClaw catalog."""
+    from src.core.config import settings as cfg
+
+    if not cfg.goclaw_gateway_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GoClaw not configured",
+        )
+    return await goclaw_client.list_skills()
+
+
+@router.post("/skills/sync")
+async def sync_skills(auth: CurrentAuth):
+    """
+    Upload/update .md files from GOCLAW_SKILLS_DIR as GoClaw skill ZIPs.
+    Idempotent — skips skills that already exist by name.
+    Returns per-file status.
+    """
+    from src.core.config import settings as cfg
+
+    if not cfg.goclaw_gateway_url:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GoClaw not configured",
+        )
+    results = await goclaw_client.sync_skills_from_dir()
+    return {"synced": results}
 
 
 @router.post("/workspaces/{workspace_id}/reprovision", status_code=status.HTTP_200_OK)
@@ -80,12 +115,15 @@ async def reprovision_workspace(
     Use when GoClaw was unavailable during workspace creation.
     Safe to call on already-provisioned workspaces — will skip if tenant exists.
     """
-    from src.core.config import settings
     import json
+
+    from src.core.config import settings
 
     ws = await db.get(Workspace, workspace_id)
     if ws is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found"
+        )
 
     if (ws.config or {}).get("goclaw_tenant_id"):
         return {"status": "already_provisioned", "workspace_id": str(workspace_id)}
@@ -102,9 +140,11 @@ async def reprovision_workspace(
     await redis.setex(
         f"ws_creds:{ws.id}",
         3600,
-        json.dumps({
-            "api_key": goclaw["goclaw_api_key"],
-            "agent_id": goclaw["goclaw_agent_id"],
-        }),
+        json.dumps(
+            {
+                "api_key": goclaw["goclaw_api_key"],
+                "agent_id": goclaw["goclaw_agent_id"],
+            }
+        ),
     )
     return {"status": "provisioned", "workspace_id": str(workspace_id), **goclaw}

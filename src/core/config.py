@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     #           openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
     # Set JWT_PRIVATE_KEY / JWT_PUBLIC_KEY to PEM file contents (newlines preserved).
     jwt_private_key: str  # RSA private key PEM — REST only (signing)
-    jwt_public_key: str   # RSA public key PEM  — REST + Shell (verification)
+    jwt_public_key: str  # RSA public key PEM  — REST + Shell (verification)
     algorithm: str = "RS256"
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 30
@@ -78,6 +78,29 @@ class Settings(BaseSettings):
 
     # MCP service shared secret (used by mcp/ service to call REST API on behalf of users)
     mcp_service_key: str = ""
+
+    # GoClaw skills
+    # Comma-separated names of catalog skills to grant to every new workspace agent
+    # e.g. "python-runner,web-scraper"
+    goclaw_default_skills: str = ""
+    # Path to directory of .md skill manifests (each file → ZIP uploaded to GoClaw)
+    # Leave empty to disable custom skill upload. Mount ./skills:/skills in Docker.
+    goclaw_skills_dir: str = ""
+    # MCP tool prefix: tools are registered as "{prefix}__{tool_name}" in GoClaw
+    # Default "ws" → ws__rag_search, ws__list_files, etc.
+    goclaw_mcp_tool_prefix: str = "ws"
+
+    # TTS default: provider applied to every new workspace agent.
+    # "openai" = route through LiteLLM → Speaches/Kokoro (recommended when LiteLLM is configured).
+    # "edge"   = free Microsoft Edge TTS (requires edge-tts CLI in GoClaw container).
+    # "off"    = no TTS.
+    goclaw_tts_provider: str = "openai"
+    # auto mode: "off" | "always" | "inbound" (reply with voice when user sent voice) | "tagged"
+    goclaw_tts_auto: str = "inbound"
+    # Voice for openai/Speaches provider (Kokoro voices: af_heart, af_sky, am_adam, ...)
+    goclaw_tts_voice: str = "af_heart"
+    # Edge TTS voice (fallback for Telegram/opus) — see `edge-tts --list-voices`
+    goclaw_tts_edge_voice: str = "en-US-JennyNeural"
 
 
 settings = Settings()
