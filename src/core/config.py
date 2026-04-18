@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # MCP tool prefix: tools are registered as "{prefix}__{tool_name}" in GoClaw
     # Default "ws" → ws__rag_search, ws__list_files, etc.
     goclaw_mcp_tool_prefix: str = "ws"
+    # Embedding model name for GoClaw memory search (hybrid FTS + pgvector).
+    # Must match a model routed through LiteLLM (Qwen3-Embedding-0.6B via Ollama).
+    # Leave empty to skip embedding provider registration (memory search disabled).
+    goclaw_embedding_model: str = "text-embedding-qwen3"
 
     # TTS default: provider applied to every new workspace agent.
     # "openai" = route through LiteLLM → Speaches/Kokoro (recommended when LiteLLM is configured).

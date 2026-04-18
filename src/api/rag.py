@@ -49,7 +49,7 @@ async def rag_search(
 @router.get("/status", response_model=RagStatusOut)
 async def rag_status(
     workspace_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     db: AsyncSession = Depends(get_db),
 ):
     await _require_member(workspace_id, auth.user.id, db)
@@ -59,7 +59,7 @@ async def rag_status(
 @router.get("/issues", response_model=RagIssuesOut)
 async def rag_issues(
     workspace_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     db: AsyncSession = Depends(get_db),
 ):
     await _require_member(workspace_id, auth.user.id, db)

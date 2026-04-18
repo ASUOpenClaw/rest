@@ -118,7 +118,12 @@ async def create_workspace(
                     ),
                 )
         except Exception as exc:
-            logger.error("GoClaw provisioning failed for workspace %s: %s", ws.id, exc)
+            logger.error(
+                "GoClaw provisioning failed for workspace %s: %s: %s",
+                ws.id,
+                type(exc).__name__,
+                exc,
+            )
             # Non-fatal: workspace is created, GoClaw can be provisioned manually.
 
     await meili.index_workspace(str(ws.id), ws.name, ws.description)

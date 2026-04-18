@@ -49,61 +49,65 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
         goclaw_agent_id   — agent UUID
     """
     base = settings.goclaw_gateway_url.rstrip("/")
-    slug = f"ws-{ws_id}"
+    slug = f"ws-{ws_id[:8]}"
 
     async with httpx.AsyncClient(timeout=15) as client:
-        # 1. Create tenant
+        # 1. Create tenant (idempotent: reuse if slug already exists)
         r = await client.post(
             f"{base}/v1/tenants",
             headers=_admin_headers(),
             json={"name": ws_name, "slug": slug},
         )
-        r.raise_for_status()
-        tenant_id: str = r.json()["id"]
-        logger.info("GoClaw tenant created: %s for workspace %s", tenant_id, ws_id)
+        if r.status_code in (409, 422) or r.status_code >= 500:
+            # Tenant already exists — look it up by slug
+            r2 = await client.get(f"{base}/v1/tenants", headers=_admin_headers())
+            r2.raise_for_status()
+            raw = r2.json()
+            tenants = raw if isinstance(raw, list) else raw.get("items") or raw.get("data") or raw.get("tenants") or []
+            logger.info("GoClaw tenants lookup: status=%s keys=%s count=%s", r2.status_code, list(raw.keys()) if isinstance(raw, dict) else "list", len(tenants))
+            existing = next((t for t in tenants if t.get("slug") == slug), None)
+            if existing is None:
+                logger.error("Tenant with slug %s not found in GoClaw list: %s", slug, raw)
+                r.raise_for_status()  # re-raise original error
+            tenant_id: str = existing["id"]
+            logger.info("GoClaw tenant already exists: %s for workspace %s", tenant_id, ws_id)
+        else:
+            r.raise_for_status()
+            tenant_id = r.json()["id"]
+            logger.info("GoClaw tenant created: %s for workspace %s", tenant_id, ws_id)
 
-        # 2. Create tenant-bound API key
+        # 2. Add system user to tenant so tenant-bound keys can operate
+        r = await client.post(
+            f"{base}/v1/tenants/{tenant_id}/users",
+            headers=_admin_headers(),
+            json={"user_id": _SYSTEM_USER, "role": "admin"},
+        )
+        if r.status_code not in (200, 201, 409):  # 409 = already a member
+            r.raise_for_status()
+        logger.info("GoClaw system user added to tenant %s", tenant_id)
+
+        # 3. Create tenant-bound API key (use tenant UUID, not slug)
         r = await client.post(
             f"{base}/v1/api-keys",
-            headers=_admin_headers(tenant_id=slug),
-            json={"name": "shell-proxy", "scopes": ["operator.write"]},
+            headers=_admin_headers(tenant_id=tenant_id),
+            json={"name": "shell-proxy", "scopes": ["operator.admin"]},
         )
         r.raise_for_status()
         api_key: str = r.json()["key"]
 
-        # 3. Create agent using the tenant key
         tenant_headers = {
             "Authorization": f"Bearer {api_key}",
             "X-GoClaw-User-Id": _SYSTEM_USER,
         }
-        agent_body: dict = {
-            "name": ws_name,
-            "key": slug,
-            "model": settings.goclaw_default_model,
-            "provider": "litellm",
-        }
-        tts_cfg = _build_tts_config(
-            settings.goclaw_tts_provider, settings.goclaw_tts_auto
-        )
-        if tts_cfg:
-            agent_body["tts"] = tts_cfg
 
-        r = await client.post(
-            f"{base}/v1/agents",
-            headers=tenant_headers,
-            json=agent_body,
-        )
-        r.raise_for_status()
-        agent_id: str = r.json()["id"]
-        logger.info("GoClaw agent created: %s for workspace %s", agent_id, ws_id)
-
-        # 4. Register LiteLLM provider (if configured)
+        # 4. Register LiteLLM provider FIRST (agent creation requires a valid provider)
+        provider_name = "litellm"
         if settings.goclaw_litellm_url:
             r = await client.post(
                 f"{base}/v1/providers",
                 headers=tenant_headers,
                 json={
-                    "name": "litellm",
+                    "name": provider_name,
                     "provider_type": "openai_compat",
                     "settings": {
                         "base_url": settings.goclaw_litellm_url,
@@ -111,10 +115,59 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                     },
                 },
             )
+            if not r.is_success:
+                logger.error("GoClaw provider create failed: %s %s", r.status_code, r.text)
             r.raise_for_status()
             logger.info("GoClaw LiteLLM provider registered for workspace %s", ws_id)
 
-        # 5. Register MCP server and grant to agent (if configured)
+        # 5. Create agent using correct field names per GoClaw HTTP API docs
+        agent_body: dict = {
+            "agent_key": slug,
+            "display_name": ws_name,
+            "provider": provider_name,
+            "model": settings.goclaw_default_model,
+            "agent_type": "open",
+        }
+        tts_cfg = _build_tts_config(
+            settings.goclaw_tts_provider, settings.goclaw_tts_auto
+        )
+        if tts_cfg:
+            agent_body["other_config"] = {"tts": tts_cfg}
+
+        r = await client.post(
+            f"{base}/v1/agents",
+            headers=tenant_headers,
+            json=agent_body,
+        )
+        if not r.is_success:
+            logger.error("GoClaw agent create failed: %s %s", r.status_code, r.text)
+        r.raise_for_status()
+        agent_id: str = r.json()["id"]
+        logger.info("GoClaw agent created: %s for workspace %s", agent_id, ws_id)
+
+        # 6. Register embedding provider for memory search (if configured)
+        if settings.goclaw_litellm_url and settings.goclaw_embedding_model:
+            r = await client.post(
+                f"{base}/v1/providers",
+                headers=tenant_headers,
+                json={
+                    "name": "litellm-embeddings",
+                    "provider_type": "openai_compat",
+                    "settings": {
+                        "base_url": settings.goclaw_litellm_url,
+                        "api_key": settings.goclaw_litellm_api_key or "no-key",
+                        "embedding_model": settings.goclaw_embedding_model,
+                    },
+                },
+            )
+            r.raise_for_status()
+            logger.info(
+                "GoClaw embedding provider registered (model: %s) for workspace %s",
+                settings.goclaw_embedding_model,
+                ws_id,
+            )
+
+        # 8. Register MCP server and grant to agent (if configured)
         if settings.goclaw_mcp_url:
             r = await client.post(
                 f"{base}/v1/mcp/servers",
@@ -142,7 +195,7 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 ws_id,
             )
 
-        # 6. Grant default skills to agent
+        # 9. Grant default skills to agent
         default_skill_ids = await _resolve_default_skill_ids(base, api_key)
         for skill_id in default_skill_ids:
             await _grant_skill_to_agent(
