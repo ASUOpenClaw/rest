@@ -114,6 +114,7 @@ async def create_workspace(
                         {
                             "api_key": goclaw["goclaw_api_key"],
                             "agent_id": goclaw["goclaw_agent_id"],
+                            "agent_key": goclaw.get("goclaw_agent_key", ""),
                         }
                     ),
                 )

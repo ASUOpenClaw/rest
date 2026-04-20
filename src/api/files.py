@@ -1,11 +1,13 @@
 import uuid
 from typing import Annotated, Literal
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
 from src.core.deps import CurrentAnyAuth, CurrentAuth
+from src.core.redis import get_redis
 from src.schemas.file import (
     DownloadUrlOut,
     FileListOut,
@@ -29,6 +31,7 @@ async def upload_file(
     description: str | None = Form(default=None),
     auto_index: bool = Form(default=True),
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ):
     return await file_svc.upload_file(
         workspace_id=workspace_id,
@@ -38,6 +41,7 @@ async def upload_file(
         description=description,
         auto_index=auto_index,
         db=db,
+        redis=redis,
     )
 
 
@@ -154,7 +158,8 @@ async def delete_file(
     file_id: uuid.UUID,
     auth: CurrentAuth,
     db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ):
     await file_svc.delete_file(
-        workspace_id=workspace_id, file_id=file_id, user=auth.user, db=db
+        workspace_id=workspace_id, file_id=file_id, user=auth.user, db=db, redis=redis
     )

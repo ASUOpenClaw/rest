@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import uuid
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import func, select, text
@@ -132,6 +136,7 @@ async def upload_file(
     description: str | None,
     auto_index: bool,
     db: AsyncSession,
+    redis=None,
 ) -> FileOut:
     await _require_member(workspace_id, user, WorkspaceRole.member, db)
 
@@ -179,6 +184,18 @@ async def upload_file(
     db.add(file)
     await db.commit()
     await db.refresh(file)
+
+    # Register file in workspace context so Shell injects it into every conversation.
+    # Key: ws_files:{ws_id} — hash {file_id → json}, no TTL, workspace-scoped.
+    if redis is not None:
+        try:
+            await redis.hset(
+                f"ws_files:{workspace_id}",
+                str(file_id),
+                json.dumps({"name": filename, "mime": mime_type}),
+            )
+        except Exception as exc:
+            logger.warning("Failed to register file in workspace context: %s", exc)
 
     if auto_index:
         job_id = str(uuid.uuid4())
@@ -361,6 +378,7 @@ async def delete_file(
     file_id: uuid.UUID,
     user: User,
     db: AsyncSession,
+    redis=None,
 ) -> None:
     member = await _require_member(workspace_id, user, WorkspaceRole.member, db)
 
@@ -388,6 +406,13 @@ async def delete_file(
 
     await db.delete(file)
     await db.commit()
+
+    # Remove from workspace file context (best-effort).
+    if redis is not None:
+        try:
+            await redis.hdel(f"ws_files:{workspace_id}", str(file_id))
+        except Exception as exc:
+            logger.warning("Failed to remove file from workspace context: %s", exc)
 
     # Notify indexer to remove Qdrant chunks (best-effort).
     await nats_svc.publish_index_job(

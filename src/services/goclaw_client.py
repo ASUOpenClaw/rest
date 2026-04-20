@@ -109,6 +109,7 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 json={
                     "name": provider_name,
                     "provider_type": "openai_compat",
+                    "enabled": True,
                     "settings": {
                         "base_url": settings.goclaw_litellm_url,
                         "api_key": settings.goclaw_litellm_api_key or "no-key",
@@ -142,8 +143,10 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
         if not r.is_success:
             logger.error("GoClaw agent create failed: %s %s", r.status_code, r.text)
         r.raise_for_status()
-        agent_id: str = r.json()["id"]
-        logger.info("GoClaw agent created: %s for workspace %s", agent_id, ws_id)
+        resp = r.json()
+        agent_id: str = resp["id"]
+        agent_key: str = resp["agent_key"]
+        logger.info("GoClaw agent created: %s (key=%s) for workspace %s", agent_id, agent_key, ws_id)
 
         # 6. Register embedding provider for memory search (if configured)
         if settings.goclaw_litellm_url and settings.goclaw_embedding_model:
@@ -206,6 +209,7 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
         "goclaw_tenant_id": tenant_id,
         "goclaw_api_key": api_key,
         "goclaw_agent_id": agent_id,
+        "goclaw_agent_key": agent_key,
     }
 
 
