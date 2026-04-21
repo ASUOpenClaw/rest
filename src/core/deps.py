@@ -23,7 +23,12 @@ import uuid
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Security, status
-from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import (
+    APIKeyHeader,
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+    OAuth2PasswordBearer,
+)
 from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +52,9 @@ from src.models import (
 # ---------------------------------------------------------------------------
 
 _bearer = HTTPBearer(auto_error=False)
+# OAuth2 password flow — registers the security scheme so Swagger shows the Authorize button.
+# Points to /auth/token which accepts form-encoded username+password.
+_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/v1/auth/token", auto_error=False)
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 # ---------------------------------------------------------------------------
@@ -174,11 +182,13 @@ async def _resolve_api_key(
 
 async def get_current_user(
     bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    oauth2_token: Annotated[str | None, Depends(_oauth2_scheme)],
     api_key: Annotated[str | None, Security(_api_key_header)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> _AuthContext:
-    if bearer is not None:
-        return await _resolve_jwt(bearer.credentials, db)
+    token = bearer.credentials if bearer is not None else oauth2_token
+    if token is not None:
+        return await _resolve_jwt(token, db)
     if api_key is not None:
         return await _resolve_api_key(api_key, db)
     raise HTTPException(
@@ -202,6 +212,7 @@ _service_key_header = APIKeyHeader(name="X-Service-Key", auto_error=False)
 
 async def get_current_user_or_service(
     bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    oauth2_token: Annotated[str | None, Depends(_oauth2_scheme)],
     api_key: Annotated[str | None, Security(_api_key_header)],
     service_key: Annotated[str | None, Security(_service_key_header)],
     x_on_behalf_of_user: Annotated[
@@ -240,8 +251,9 @@ async def get_current_user_or_service(
         return _AuthContext(user=user)
 
     # Standard user auth paths
-    if bearer is not None:
-        return await _resolve_jwt(bearer.credentials, db)
+    token = bearer.credentials if bearer is not None else oauth2_token
+    if token is not None:
+        return await _resolve_jwt(token, db)
     if api_key is not None:
         return await _resolve_api_key(api_key, db)
     raise HTTPException(

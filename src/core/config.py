@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     # Must match a model routed through LiteLLM (Qwen3-Embedding-0.6B via Ollama).
     # Leave empty to skip embedding provider registration (memory search disabled).
     goclaw_embedding_model: str = "text-embedding-qwen3"
+    # Agent personality — if set, GoClaw LLM-summons SOUL.md/IDENTITY.md from this description
+    goclaw_agent_description: str = ""
+    # Agent type: "open" (per-user context files) or "predefined" (shared context)
+    goclaw_agent_type: str = "open"
 
     # TTS default: provider applied to every new workspace agent.
     # "openai" = route through LiteLLM → Speaches/Kokoro (recommended when LiteLLM is configured).

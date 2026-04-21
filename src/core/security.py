@@ -110,3 +110,16 @@ def hash_api_key(key: str) -> str:
 def verify_api_key(key: str, key_hash: str) -> bool:
     """Constant-time bcrypt verification."""
     return bcrypt.checkpw(key.encode(), key_hash.encode())
+
+
+# ---------------------------------------------------------------------------
+# Passwords
+# ---------------------------------------------------------------------------
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())

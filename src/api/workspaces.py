@@ -8,6 +8,7 @@ from src.core.db import get_db
 from src.core.deps import CurrentAuth
 from src.core.redis import get_redis
 from src.schemas.workspace import (
+    CronJobCreateRequest,
     InviteCreateRequest,
     InviteOut,
     JoinRequest,
@@ -481,6 +482,69 @@ async def remove_workspace_plugin(
     config["plugins"] = [p for p in plugins if p["id"] != plugin_id]
     ws.config = config
     await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Cron job management
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{workspace_id}/cron")
+async def list_workspace_cron_jobs(
+    workspace_id: uuid.UUID,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """List cron jobs for this workspace's GoClaw agent."""
+    from src.services import goclaw_client
+
+    ws, api_key, _ = await _get_ws_with_creds(workspace_id, auth, db)
+    jobs = await goclaw_client.list_cron_jobs(api_key)
+    return {"jobs": jobs}
+
+
+@router.post("/{workspace_id}/cron", status_code=status.HTTP_201_CREATED)
+async def create_workspace_cron_job(
+    workspace_id: uuid.UUID,
+    body: CronJobCreateRequest,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a scheduled cron job for this workspace's agent. Requires admin/owner."""
+    from src.models import WorkspaceRole
+    from src.services import goclaw_client
+
+    ws, api_key, agent_id = await _get_ws_with_creds(
+        workspace_id, auth, db, min_role=WorkspaceRole.admin
+    )
+    service_token = (ws.config or {}).get("goclaw_mcp_service_token", "")
+    # Embed service token in the cron message so the agent can call MCP tools
+    # during scheduled turns, which bypass Shell proxy and have no session token.
+    enriched_message = (
+        f"{body.message}\n\n[SERVICE_CTX: mcp_service={service_token}]"
+        if service_token
+        else body.message
+    )
+    return await goclaw_client.create_cron_job(
+        api_key, agent_id, body.name, body.schedule, enriched_message
+    )
+
+
+@router.delete("/{workspace_id}/cron/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_workspace_cron_job(
+    workspace_id: uuid.UUID,
+    job_id: str,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a cron job by ID. Requires admin/owner."""
+    from src.models import WorkspaceRole
+    from src.services import goclaw_client
+
+    ws, api_key, _ = await _get_ws_with_creds(
+        workspace_id, auth, db, min_role=WorkspaceRole.admin
+    )
+    await goclaw_client.delete_cron_job(api_key, job_id)
 
 
 @router.post("/join", response_model=WorkspaceOut)

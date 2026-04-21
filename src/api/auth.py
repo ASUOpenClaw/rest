@@ -4,6 +4,7 @@ from typing import Annotated
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
@@ -13,7 +14,9 @@ from src.schemas.auth import (
     ApiKeyCreatedOut,
     ApiKeyCreateRequest,
     ApiKeyOut,
+    LoginRequest,
     OAuthCallbackOut,
+    RegisterRequest,
     TokenRefreshOut,
     TokenRefreshRequest,
     UserMeOut,
@@ -21,6 +24,57 @@ from src.schemas.auth import (
 from src.services import auth as auth_svc
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+# ---------------------------------------------------------------------------
+# Email / password
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/register", response_model=OAuthCallbackOut, status_code=status.HTTP_201_CREATED
+)
+async def register(
+    body: RegisterRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    return await auth_svc.register_user(
+        email=body.email,
+        password=body.password,
+        display_name=body.display_name,
+        db=db,
+        redis=redis,
+    )
+
+
+@router.post("/login", response_model=OAuthCallbackOut)
+async def login(
+    body: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    return await auth_svc.login_user(
+        email=body.email,
+        password=body.password,
+        db=db,
+        redis=redis,
+    )
+
+
+@router.post("/token", response_model=OAuthCallbackOut, include_in_schema=False)
+async def token_swagger(
+    form: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    """OAuth2 password flow endpoint — used by Swagger UI Authorize dialog."""
+    return await auth_svc.login_user(
+        email=form.username,
+        password=form.password,
+        db=db,
+        redis=redis,
+    )
 
 
 # ---------------------------------------------------------------------------

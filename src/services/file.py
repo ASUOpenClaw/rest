@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Literal
 
@@ -192,7 +193,13 @@ async def upload_file(
             await redis.hset(
                 f"ws_files:{workspace_id}",
                 str(file_id),
-                json.dumps({"name": filename, "mime": mime_type}),
+                json.dumps(
+                    {
+                        "name": filename,
+                        "mime": mime_type,
+                        "uploaded_at": int(time.time()),
+                    }
+                ),
             )
         except Exception as exc:
             logger.warning("Failed to register file in workspace context: %s", exc)

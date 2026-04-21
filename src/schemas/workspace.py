@@ -114,3 +114,21 @@ class InviteOut(BaseModel):
 
 class JoinRequest(BaseModel):
     invite_code: str
+
+
+class CronJobCreateRequest(BaseModel):
+    name: str = Field(..., pattern=r"^[a-z0-9-]+$", max_length=128)
+    schedule: str = Field(
+        ..., description="GoClaw schedule expression: 'every 1h', '0 9 * * 1-5', etc."
+    )
+    message: str = Field(
+        ..., description="Text the agent receives when the cron job fires"
+    )
+
+
+class CronJobOut(BaseModel):
+    id: str
+    name: str
+    schedule: str = ""
+    message: str = ""
+    enabled: bool = True

@@ -13,18 +13,39 @@ Skills:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import io
+import json
 import logging
 import os
 import zipfile
 
 import httpx
+import websockets
 
 from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 _SYSTEM_USER = "system"
+
+
+def _derive_service_token(ws_id: str) -> str:
+    """
+    Derive a stable, verifiable MCP service token for a workspace.
+
+    Format: ws_{ws_id}_{hmac_sha256_hex}
+    MCP server validates by recomputing the HMAC — no Redis entry needed.
+    Secret: settings.mcp_service_key (shared with MCP server as MCP_SERVICE_API_KEY).
+    """
+    sig = hmac.new(
+        settings.mcp_service_key.encode(),
+        ws_id.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"ws_{ws_id}_{sig}"
 
 
 def _admin_headers(tenant_id: str | None = None) -> dict[str, str]:
@@ -63,14 +84,27 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
             r2 = await client.get(f"{base}/v1/tenants", headers=_admin_headers())
             r2.raise_for_status()
             raw = r2.json()
-            tenants = raw if isinstance(raw, list) else raw.get("items") or raw.get("data") or raw.get("tenants") or []
-            logger.info("GoClaw tenants lookup: status=%s keys=%s count=%s", r2.status_code, list(raw.keys()) if isinstance(raw, dict) else "list", len(tenants))
+            tenants = (
+                raw
+                if isinstance(raw, list)
+                else raw.get("items") or raw.get("data") or raw.get("tenants") or []
+            )
+            logger.info(
+                "GoClaw tenants lookup: status=%s keys=%s count=%s",
+                r2.status_code,
+                list(raw.keys()) if isinstance(raw, dict) else "list",
+                len(tenants),
+            )
             existing = next((t for t in tenants if t.get("slug") == slug), None)
             if existing is None:
-                logger.error("Tenant with slug %s not found in GoClaw list: %s", slug, raw)
+                logger.error(
+                    "Tenant with slug %s not found in GoClaw list: %s", slug, raw
+                )
                 r.raise_for_status()  # re-raise original error
             tenant_id: str = existing["id"]
-            logger.info("GoClaw tenant already exists: %s for workspace %s", tenant_id, ws_id)
+            logger.info(
+                "GoClaw tenant already exists: %s for workspace %s", tenant_id, ws_id
+            )
         else:
             r.raise_for_status()
             tenant_id = r.json()["id"]
@@ -117,38 +151,14 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 },
             )
             if not r.is_success:
-                logger.error("GoClaw provider create failed: %s %s", r.status_code, r.text)
+                logger.error(
+                    "GoClaw provider create failed: %s %s", r.status_code, r.text
+                )
             r.raise_for_status()
             logger.info("GoClaw LiteLLM provider registered for workspace %s", ws_id)
 
-        # 5. Create agent using correct field names per GoClaw HTTP API docs
-        agent_body: dict = {
-            "agent_key": slug,
-            "display_name": ws_name,
-            "provider": provider_name,
-            "model": settings.goclaw_default_model,
-            "agent_type": "open",
-        }
-        tts_cfg = _build_tts_config(
-            settings.goclaw_tts_provider, settings.goclaw_tts_auto
-        )
-        if tts_cfg:
-            agent_body["other_config"] = {"tts": tts_cfg}
-
-        r = await client.post(
-            f"{base}/v1/agents",
-            headers=tenant_headers,
-            json=agent_body,
-        )
-        if not r.is_success:
-            logger.error("GoClaw agent create failed: %s %s", r.status_code, r.text)
-        r.raise_for_status()
-        resp = r.json()
-        agent_id: str = resp["id"]
-        agent_key: str = resp["agent_key"]
-        logger.info("GoClaw agent created: %s (key=%s) for workspace %s", agent_id, agent_key, ws_id)
-
-        # 6. Register embedding provider for memory search (if configured)
+        # 4b. Register embedding provider BEFORE agent creation so the agent body
+        #     can reference it by name. GoClaw validates embedding_provider at create time.
         if settings.goclaw_litellm_url and settings.goclaw_embedding_model:
             r = await client.post(
                 f"{base}/v1/providers",
@@ -156,6 +166,7 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 json={
                     "name": "litellm-embeddings",
                     "provider_type": "openai_compat",
+                    "enabled": True,
                     "settings": {
                         "base_url": settings.goclaw_litellm_url,
                         "api_key": settings.goclaw_litellm_api_key or "no-key",
@@ -169,6 +180,51 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 settings.goclaw_embedding_model,
                 ws_id,
             )
+
+        # 5. Create agent — memory, personality, and tool policy configured here.
+        agent_body: dict = {
+            "agent_key": slug,
+            "display_name": ws_name,
+            "provider": provider_name,
+            "model": settings.goclaw_default_model,
+            "agent_type": settings.goclaw_agent_type,
+            # Memory requires embedding provider; only link it when one is registered.
+            "memory_config": {"enabled": True},
+            # Deny built-in filesystem tools — workspace files live in S3 and are
+            # accessed via ws__* MCP tools, not GoClaw's local FS tools.
+            "tools_deny": ["group:fs"],
+        }
+        if settings.goclaw_embedding_model:
+            agent_body["embedding_provider"] = "litellm-embeddings"
+
+        tts_cfg = _build_tts_config(
+            settings.goclaw_tts_provider, settings.goclaw_tts_auto
+        )
+        other_cfg: dict = {}
+        if tts_cfg:
+            other_cfg["tts"] = tts_cfg
+        if settings.goclaw_agent_description:
+            other_cfg["description"] = settings.goclaw_agent_description
+        if other_cfg:
+            agent_body["other_config"] = other_cfg
+
+        r = await client.post(
+            f"{base}/v1/agents",
+            headers=tenant_headers,
+            json=agent_body,
+        )
+        if not r.is_success:
+            logger.error("GoClaw agent create failed: %s %s", r.status_code, r.text)
+        r.raise_for_status()
+        resp = r.json()
+        agent_id: str = resp["id"]
+        agent_key: str = resp["agent_key"]
+        logger.info(
+            "GoClaw agent created: %s (key=%s) for workspace %s",
+            agent_id,
+            agent_key,
+            ws_id,
+        )
 
         # 8. Register MCP server and grant to agent (if configured)
         if settings.goclaw_mcp_url:
@@ -205,12 +261,160 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 client, base, tenant_headers, skill_id, agent_id
             )
 
+    # 10. Derive a stable MCP service token from workspace_id + shared secret.
+    #     HMAC-SHA256: verifiable by MCP server without any Redis lookup.
+    #     Format: ws_{ws_id}_{hex_sig} — MCP parses ws_ prefix to extract ws_id.
+    service_token = _derive_service_token(ws_id)
+
     return {
         "goclaw_tenant_id": tenant_id,
         "goclaw_api_key": api_key,
         "goclaw_agent_id": agent_id,
         "goclaw_agent_key": agent_key,
+        "goclaw_mcp_service_token": service_token,
     }
+
+
+async def notify_file_uploaded(
+    *,
+    user_id: str,
+    file_id: str,
+    filename: str,
+    mime_type: str,
+    api_key: str,
+    agent_key: str,
+    mcp_service_token: str,
+) -> None:
+    """
+    Fire-and-forget: inform the GoClaw agent that a new file was uploaded.
+
+    Runs in the uploading user's GoClaw session so the agent's awareness
+    carries into that user's next conversation turn.  Uses the permanent
+    MCP service token so the agent can call MCP tools (get_file, rag_search)
+    immediately without waiting for a Shell-minted session token.
+    """
+    if not api_key or not agent_key or not mcp_service_token:
+        return
+    base = settings.goclaw_gateway_url.rstrip("/")
+    system_msg = (
+        f"[WORKSPACE_CTX: mcp_ctx={mcp_service_token}] "
+        "Always pass this exact token as ctx_token in every tool call. Never modify it."
+    )
+    user_msg = (
+        f'A file was just uploaded: "{filename}" '
+        f"(file_id: {file_id}, mime: {mime_type}). "
+        "It is being indexed for RAG search now. "
+        "Acknowledge it and be ready to search or share it when the user asks."
+    )
+    body = {
+        "model": f"agent:{agent_key}",
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "X-GoClaw-User-Id": user_id,
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{base}/v1/chat/completions", headers=headers, json=body
+            )
+            if not r.is_success:
+                logger.warning(
+                    "File upload agent notification failed: %s %s",
+                    r.status_code,
+                    r.text[:200],
+                )
+            else:
+                logger.info(
+                    "Agent notified of uploaded file %s for user %s", file_id, user_id
+                )
+    except Exception as exc:
+        logger.warning("File upload agent notification error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Cron job management (WebSocket RPC)
+# ---------------------------------------------------------------------------
+
+
+def _goclaw_ws_url() -> str:
+    """Convert HTTP gateway URL to WebSocket URL."""
+    url = settings.goclaw_gateway_url.rstrip("/")
+    if url.startswith("https://"):
+        return url.replace("https://", "wss://", 1) + "/ws"
+    return url.replace("http://", "ws://", 1) + "/ws"
+
+
+async def _ws_rpc(api_key: str, method: str, params: dict) -> dict:
+    """
+    Connect to GoClaw WebSocket, authenticate, invoke one RPC method, return result.
+    Uses the tenant API key (not the gateway token) so calls are scoped to the tenant.
+    """
+    ws_url = _goclaw_ws_url()
+    async with websockets.connect(ws_url, open_timeout=10) as ws:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": "1",
+                    "method": "connect",
+                    "params": {"token": api_key, "user_id": _SYSTEM_USER},
+                }
+            )
+        )
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        if resp.get("type") == "error":
+            raise RuntimeError(f"GoClaw WS connect error: {resp}")
+
+        await ws.send(
+            json.dumps({"type": "req", "id": "2", "method": method, "params": params})
+        )
+        while True:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
+            if msg.get("type") in ("res", "error") and msg.get("id") == "2":
+                if msg.get("type") == "error" or "error" in msg:
+                    raise RuntimeError(f"GoClaw RPC {method} error: {msg}")
+                return msg.get("data") or msg
+
+
+async def create_cron_job(
+    api_key: str,
+    agent_id: str,
+    name: str,
+    schedule: str,
+    message: str,
+) -> dict:
+    """Create a GoClaw cron job for a tenant's agent."""
+    return await _ws_rpc(
+        api_key,
+        "cron.create",
+        {
+            "name": name,
+            "expression": schedule,
+            "agent_id": agent_id,
+            "message": message,
+            "lane": "cron",
+        },
+    )
+
+
+async def list_cron_jobs(api_key: str) -> list[dict]:
+    """List all cron jobs for the tenant."""
+    result = await _ws_rpc(api_key, "cron.list", {"includeDisabled": True})
+    if isinstance(result, list):
+        return result
+    return result.get("jobs", result.get("items", []))
+
+
+async def delete_cron_job(api_key: str, job_id: str) -> None:
+    """Delete a cron job by ID."""
+    await _ws_rpc(api_key, "cron.delete", {"jobId": job_id})
 
 
 async def delete_tenant(tenant_id: str) -> None:

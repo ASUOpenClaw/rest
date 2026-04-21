@@ -41,6 +41,15 @@ async def lifespan(app: FastAPI):
     await nats_svc.connect(settings.nats_url)
     await meili_svc.init(settings.meilisearch_url, settings.meilisearch_api_key or None)
 
+    if settings.goclaw_gateway_url and settings.goclaw_skills_dir:
+        from src.services import goclaw_client
+
+        try:
+            results = await goclaw_client.sync_skills_from_dir()
+            logger.info("GoClaw skills sync on startup: %s", results)
+        except Exception as exc:
+            logger.warning("GoClaw skills sync failed at startup: %s", exc)
+
     js = nats_svc.get_js()
     if js is not None:
         from src.subscribers import conversation, indexing

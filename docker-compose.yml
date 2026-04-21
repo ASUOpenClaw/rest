@@ -141,6 +141,9 @@ services:
             RAG_SERVICE_URL: http://rag:8001
         extra_hosts:
             - "host.docker.internal:host-gateway"
+        volumes:
+            - ../skills:/skills:ro
+            - ./src:/app/src
         depends_on:
             postgres:
                 condition: service_healthy

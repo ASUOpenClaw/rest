@@ -21,7 +21,9 @@ from src.core.security import (
     decode_token,
     generate_api_key,
     hash_api_key,
+    hash_password,
     redis_refresh_key,
+    verify_password,
 )
 from src.models import (
     ApiKey,
@@ -124,6 +126,74 @@ async def logout(
                 await redis.delete(*keys)
             if cursor == 0:
                 break
+
+
+# ---------------------------------------------------------------------------
+# Email / password auth
+# ---------------------------------------------------------------------------
+
+
+async def register_user(
+    email: str,
+    password: str,
+    display_name: str | None,
+    db: AsyncSession,
+    redis: aioredis.Redis,
+) -> OAuthCallbackOut:
+    from fastapi import HTTPException, status
+
+    email = email.strip().lower()
+    result = await db.execute(select(User).where(User.email == email))
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered",
+        )
+
+    # Check invite stub merge
+    result = await db.execute(select(User).where(User.invite_email == email))
+    user = result.scalar_one_or_none()
+    if user is not None:
+        user.email = email
+        user.display_name = display_name or email.split("@")[0]
+        user.invite_email = None
+        user.password_hash = hash_password(password)
+    else:
+        user = User(
+            email=email,
+            display_name=display_name or email.split("@")[0],
+            password_hash=hash_password(password),
+        )
+        db.add(user)
+
+    await db.commit()
+    await db.refresh(user)
+    tokens = await issue_token_pair(user, redis)
+    return OAuthCallbackOut(user=UserOut.model_validate(user), **tokens)
+
+
+async def login_user(
+    email: str,
+    password: str,
+    db: AsyncSession,
+    redis: aioredis.Redis,
+) -> OAuthCallbackOut:
+    from fastapi import HTTPException, status
+
+    invalid_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid email or password",
+    )
+
+    result = await db.execute(select(User).where(User.email == email.strip().lower()))
+    user = result.scalar_one_or_none()
+    if user is None or not user.password_hash:
+        raise invalid_exc
+    if not verify_password(password, user.password_hash):
+        raise invalid_exc
+
+    tokens = await issue_token_pair(user, redis)
+    return OAuthCallbackOut(user=UserOut.model_validate(user), **tokens)
 
 
 # ---------------------------------------------------------------------------
