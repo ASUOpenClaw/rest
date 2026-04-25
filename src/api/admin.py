@@ -134,6 +134,19 @@ async def reprovision_workspace(
             detail="GoClaw not configured",
         )
 
+    from sqlalchemy import select
+
+    from src.models import WorkspaceMember, WorkspaceRole
+
+    owner_result = await db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.role == WorkspaceRole.owner,
+        )
+    )
+    owner_member = owner_result.scalar_one_or_none()
+    owner_user_id = str(owner_member.user_id) if owner_member else str(auth.user.id)
+
     goclaw = await goclaw_client.provision_workspace(str(ws.id), ws.name)
     ws.config = {**(ws.config or {}), **goclaw}
     await db.commit()
@@ -146,6 +159,7 @@ async def reprovision_workspace(
                 "agent_id": goclaw["goclaw_agent_id"],
                 "agent_key": goclaw.get("goclaw_agent_key", ""),
                 "mcp_service_token": goclaw.get("goclaw_mcp_service_token", ""),
+                "owner_user_id": owner_user_id,
             }
         ),
     )

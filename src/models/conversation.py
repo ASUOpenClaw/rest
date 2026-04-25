@@ -42,6 +42,12 @@ class Conversation(Base, UUIDMixin):
     last_message_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # GoClaw session key that owns this conversation.
+    # Format: "user-{user_uuid}" for default sessions; arbitrary string for custom.
+    # Unique per workspace (partial unique index, NULL excluded).
+    goclaw_session_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
     # Whether the transcript has been indexed into RAG for future recall
     rag_indexed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

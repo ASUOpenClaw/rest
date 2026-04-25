@@ -5,8 +5,6 @@ services:
             POSTGRES_USER: openclaw
             POSTGRES_PASSWORD: openclaw
             POSTGRES_DB: openclaw
-        ports:
-            - "5432:5432"
         volumes:
             - postgres_data:/var/lib/postgresql/data
         healthcheck:
@@ -18,7 +16,7 @@ services:
     redis:
         image: redis:7-alpine
         ports:
-            - "6379:6379"
+            - "6379:6379" # shell native binary connects via localhost
         volumes:
             - redis_data:/data
         healthcheck:
@@ -26,14 +24,15 @@ services:
             interval: 5s
             timeout: 5s
             retries: 5
+        networks:
+            - default
+            - openclaw-net
 
     meilisearch:
         image: getmeili/meilisearch:v1.13
         environment:
             MEILI_ENV: development
             MEILI_MASTER_KEY: openclaw-dev-key
-        ports:
-            - "7700:7700"
         volumes:
             - meilisearch_data:/meili_data
 
@@ -41,20 +40,18 @@ services:
         image: nats:2-alpine
         command: ["-js"]
         ports:
-            - "4222:4222"
+            - "4222:4222" # shell native binary connects via localhost
+        networks:
+            - default
+            - openclaw-net
 
     qdrant:
         image: qdrant/qdrant:v1.13.6
-        ports:
-            - "6333:6333"
         volumes:
             - qdrant_data:/qdrant/storage
 
     garage:
         image: dxflrs/garage:v1.0.1
-        ports:
-            - "3900:3900" # S3 API
-            - "3903:3903" # admin API
         volumes:
             - ./garage.toml:/etc/garage.toml:ro
             - garage_meta:/var/lib/garage/meta
@@ -89,11 +86,13 @@ services:
             RAG_QDRANT_COLLECTION: chunks
             RAG_HOST: 0.0.0.0
             RAG_PORT: "8001"
+            RAG_EMBEDDING_URL: http://litellm:4000/v1
         env_file: .env
-        extra_hosts:
-            - "host.docker.internal:host-gateway"
         depends_on:
             - qdrant
+        networks:
+            - default
+            - openclaw-net
         restart: unless-stopped
 
     parser:
@@ -103,29 +102,37 @@ services:
             PARSER_S3_ENDPOINT: http://garage:3900
             PARSER_QDRANT_URL: http://qdrant:6333
             PARSER_SPEACHES_URL: ${SPEACHES_URL:-http://localhost:8014}
+            PARSER_EMBEDDING_URL: http://litellm:4000/v1
+            PARSER_S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+            PARSER_S3_SECRET_KEY: ${S3_SECRET_ACCESS_KEY}
         env_file: .env
-        extra_hosts:
-            - "host.docker.internal:host-gateway"
         depends_on:
             - nats
             - qdrant
             - garage
+        networks:
+            - default
+            - openclaw-net
         restart: unless-stopped
 
-    # mcp:
-    #     build: ../mcp
-    #     ports:
-    #         - "8002:8002"
-    #     environment:
-    #         MCP_REST_URL: http://api:8000
-    #         MCP_REDIS_URL: redis://redis:6379/0
-    #         MCP_HOST: 0.0.0.0
-    #         MCP_PORT: "8002"
-    #     env_file: .env
-    #     depends_on:
-    #         - api
-    #         - redis
-    #     restart: unless-stopped
+    mcp:
+        build: ../mcp
+        container_name: mcp
+        ports:
+            - "8002:8002"
+        environment:
+            MCP_REST_URL: http://api:8000/v1
+            MCP_REDIS_URL: redis://redis:6379/0
+            MCP_HOST: 0.0.0.0
+            MCP_PORT: "8002"
+        env_file: .env
+        depends_on:
+            - api
+            - redis
+        networks:
+            - default
+            - openclaw-net
+        restart: unless-stopped
 
     api:
         build: .
@@ -139,8 +146,9 @@ services:
             NATS_URL: nats://nats:4222
             S3_ENDPOINT_URL: http://garage:3900
             RAG_SERVICE_URL: http://rag:8001
-        extra_hosts:
-            - "host.docker.internal:host-gateway"
+            GOCLAW_GATEWAY_URL: http://goclaw:18790
+            GOCLAW_LITELLM_URL: http://litellm:4000/v1
+            SHELL_SERVICE_URL: http://shell-shell-1:18080
         volumes:
             - ../skills:/skills:ro
             - ./src:/app/src
@@ -157,6 +165,9 @@ services:
                 condition: service_started
             qdrant:
                 condition: service_started
+        networks:
+            - default
+            - openclaw-net
         restart: unless-stopped
 
 volumes:
@@ -166,3 +177,7 @@ volumes:
     garage_meta:
     garage_data:
     qdrant_data:
+
+networks:
+    openclaw-net:
+        external: true

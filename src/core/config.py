@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     jwt_private_key: str  # RSA private key PEM — REST only (signing)
     jwt_public_key: str  # RSA public key PEM  — REST + Shell (verification)
     algorithm: str = "RS256"
-    access_token_expire_minutes: int = 60
+    access_token_expire_minutes: int = 525600  # 1 year
     refresh_token_expire_days: int = 30
 
     # OAuth — Yandex
@@ -78,6 +78,13 @@ class Settings(BaseSettings):
 
     # MCP service shared secret (used by mcp/ service to call REST API on behalf of users)
     mcp_service_key: str = ""
+
+    # Shell service (WS RPC bridge to GoClaw)
+    shell_service_url: str = "http://shell-shell-1:8080"
+    shell_service_key: str = "shell-service-key"  # X-Shell-Service-Key shared secret
+
+    # Background GoClaw sync (session → conversation reconciliation)
+    goclaw_sync_interval_seconds: int = 300  # 0 = disabled
 
     # GoClaw skills
     # Comma-separated names of catalog skills to grant to every new workspace agent

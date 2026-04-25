@@ -59,6 +59,11 @@ async def lifespan(app: FastAPI):
         await conversation.start(js)
         await transcription_sub.start(js)
 
+    if settings.goclaw_sync_interval_seconds > 0 and settings.shell_service_key:
+        from src.services import goclaw_sync
+
+        await goclaw_sync.start()
+
     yield
 
     # --- shutdown ---

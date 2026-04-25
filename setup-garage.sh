@@ -11,7 +11,7 @@ garage() {
 }
 
 echo "==> Waiting for Garage to be ready..."
-until curl -sf http://localhost:3903/health &>/dev/null; do
+until docker compose exec "$COMPOSE_SERVICE" /garage status &>/dev/null; do
     sleep 1
 done
 
@@ -23,9 +23,15 @@ if [[ -z "$NODE_ID" ]]; then
 fi
 echo "    Node: $NODE_ID"
 
-echo "==> Assigning layout..."
-garage layout assign -z dc1 -c 1G "$NODE_ID"
-garage layout apply --version 1
+echo "==> Assigning layout (skip if already applied)..."
+if garage status 2>&1 | grep -q "$NODE_ID"; then
+    echo "    Layout already applied, skipping."
+else
+    CURRENT_VERSION=$(garage layout show 2>/dev/null | grep -oP 'Current cluster layout version: \K[0-9]+' || echo "0")
+    NEXT_VERSION=$(( CURRENT_VERSION + 1 ))
+    garage layout assign -z dc1 -c 1G "$NODE_ID"
+    garage layout apply --version "$NEXT_VERSION"
+fi
 
 echo "==> Creating key '$KEY_NAME'..."
 if garage key list | grep -q "$KEY_NAME"; then
@@ -45,7 +51,7 @@ if [[ -z "$KEY_ID" || -z "$KEY_SECRET" ]]; then
 fi
 
 echo "==> Creating bucket '$BUCKET_NAME'..."
-if garage bucket list | grep -q "^$BUCKET_NAME$"; then
+if garage bucket list | grep -q "^$BUCKET_NAME"; then
     echo "    Bucket already exists, skipping creation."
 else
     garage bucket create "$BUCKET_NAME"

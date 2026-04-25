@@ -118,6 +118,7 @@ async def create_workspace(
                             "mcp_service_token": goclaw.get(
                                 "goclaw_mcp_service_token", ""
                             ),
+                            "owner_user_id": str(user.id),
                         }
                     ),
                 )

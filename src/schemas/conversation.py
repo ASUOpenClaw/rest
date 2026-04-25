@@ -12,6 +12,7 @@ class ConversationOut(BaseModel):
     workspace_id: uuid.UUID
     user_id: uuid.UUID
     title: str | None
+    goclaw_session_key: str | None = None
     message_count: int
     last_message_at: datetime | None
     rag_indexed_at: datetime | None

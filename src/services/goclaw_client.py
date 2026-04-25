@@ -13,7 +13,6 @@ Skills:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import io
@@ -23,7 +22,6 @@ import os
 import zipfile
 
 import httpx
-import websockets
 
 from src.core.config import settings
 
@@ -120,11 +118,18 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
             r.raise_for_status()
         logger.info("GoClaw system user added to tenant %s", tenant_id)
 
-        # 3. Create tenant-bound API key (use tenant UUID, not slug)
+        # 3. Create tenant-bound API key (use tenant UUID, not slug).
+        # GoClaw requires BOTH the X-GoClaw-Tenant-Id header AND a body tenant_id
+        # to actually persist api_keys.tenant_id. Header alone leaves it NULL
+        # (system-level key), and body alone silently coerces to the master tenant.
         r = await client.post(
             f"{base}/v1/api-keys",
             headers=_admin_headers(tenant_id=tenant_id),
-            json={"name": "shell-proxy", "scopes": ["operator.admin"]},
+            json={
+                "name": "shell-proxy",
+                "scopes": ["operator.admin"],
+                "tenant_id": tenant_id,
+            },
         )
         r.raise_for_status()
         api_key: str = r.json()["key"]
@@ -192,7 +197,9 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
             "memory_config": {"enabled": True},
             # Deny built-in filesystem tools — workspace files live in S3 and are
             # accessed via ws__* MCP tools, not GoClaw's local FS tools.
-            "tools_deny": ["group:fs"],
+            # GoClaw expects the deny list nested inside tools_config (not a top-level
+            # tools_deny field — that one is silently ignored).
+            "tools_config": {"deny": ["group:fs"]},
         }
         if settings.goclaw_embedding_model:
             agent_body["embedding_provider"] = "litellm-embeddings"
@@ -341,80 +348,6 @@ async def notify_file_uploaded(
 # ---------------------------------------------------------------------------
 # Cron job management (WebSocket RPC)
 # ---------------------------------------------------------------------------
-
-
-def _goclaw_ws_url() -> str:
-    """Convert HTTP gateway URL to WebSocket URL."""
-    url = settings.goclaw_gateway_url.rstrip("/")
-    if url.startswith("https://"):
-        return url.replace("https://", "wss://", 1) + "/ws"
-    return url.replace("http://", "ws://", 1) + "/ws"
-
-
-async def _ws_rpc(api_key: str, method: str, params: dict) -> dict:
-    """
-    Connect to GoClaw WebSocket, authenticate, invoke one RPC method, return result.
-    Uses the tenant API key (not the gateway token) so calls are scoped to the tenant.
-    """
-    ws_url = _goclaw_ws_url()
-    async with websockets.connect(ws_url, open_timeout=10) as ws:
-        await ws.send(
-            json.dumps(
-                {
-                    "type": "req",
-                    "id": "1",
-                    "method": "connect",
-                    "params": {"token": api_key, "user_id": _SYSTEM_USER},
-                }
-            )
-        )
-        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-        if resp.get("type") == "error":
-            raise RuntimeError(f"GoClaw WS connect error: {resp}")
-
-        await ws.send(
-            json.dumps({"type": "req", "id": "2", "method": method, "params": params})
-        )
-        while True:
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
-            if msg.get("type") in ("res", "error") and msg.get("id") == "2":
-                if msg.get("type") == "error" or "error" in msg:
-                    raise RuntimeError(f"GoClaw RPC {method} error: {msg}")
-                return msg.get("data") or msg
-
-
-async def create_cron_job(
-    api_key: str,
-    agent_id: str,
-    name: str,
-    schedule: str,
-    message: str,
-) -> dict:
-    """Create a GoClaw cron job for a tenant's agent."""
-    return await _ws_rpc(
-        api_key,
-        "cron.create",
-        {
-            "name": name,
-            "expression": schedule,
-            "agent_id": agent_id,
-            "message": message,
-            "lane": "cron",
-        },
-    )
-
-
-async def list_cron_jobs(api_key: str) -> list[dict]:
-    """List all cron jobs for the tenant."""
-    result = await _ws_rpc(api_key, "cron.list", {"includeDisabled": True})
-    if isinstance(result, list):
-        return result
-    return result.get("jobs", result.get("items", []))
-
-
-async def delete_cron_job(api_key: str, job_id: str) -> None:
-    """Delete a cron job by ID."""
-    await _ws_rpc(api_key, "cron.delete", {"jobId": job_id})
 
 
 async def delete_tenant(tenant_id: str) -> None:

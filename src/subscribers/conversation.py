@@ -1,22 +1,18 @@
 """
 Subscriber: conversation.{workspace_id}
 
-Consumes conversation dumps published by the Rust proxy and writes to:
-  - conversations (upsert)
+Consumes conversation dumps published by the Shell and writes to:
+  - conversations (upsert by goclaw_session_key)
   - conversation_messages (insert)
 
-Direction=request:
-  - Upsert Conversation (id from body.conversation_id, workspace_id, user_id)
-  - Set title = first 60 chars of last user message if title is None
-  - Insert ConversationMessage(role=user, content, raw=body)
+The Shell now publishes a top-level `session_key` field on every message.
+The subscriber uses (workspace_id, goclaw_session_key) as the stable identity
+for a conversation — creating a new row the first time a session is seen.
 
-Direction=response:
-  - Insert ConversationMessage(role=assistant, content, model, usage, raw=body)
-  - Update conversation.message_count + 1, last_message_at
-  - If message_count >= RAG_INDEX_THRESHOLD: upload transcript to S3, publish indexing.jobs
+Legacy messages that carry a `conversation_id` UUID in the body are still handled
+for backwards compatibility.
 
-Parse errors are always ACKed so they never block the stream.
-DB errors cause NACK for redelivery.
+Parse errors are always ACKed. DB errors cause NACK for redelivery.
 """
 
 from __future__ import annotations
@@ -30,6 +26,7 @@ from datetime import UTC, datetime
 import nats.js
 from nats.aio.msg import Msg
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.core.config import settings
 from src.core.db import AsyncSessionLocal
@@ -52,6 +49,7 @@ async def _handle(msg: Msg) -> None:
     direction: str = event.get("direction", "")
     workspace_id_raw: str = event.get("workspace_id", "")
     user_id_raw: str = event.get("user_id", "")
+    session_key: str | None = event.get("session_key") or None
     body: dict = event.get("body", {})
 
     try:
@@ -62,23 +60,32 @@ async def _handle(msg: Msg) -> None:
         await msg.ack()
         return
 
-    conversation_id_raw: str | None = body.get("conversation_id") or body.get(
-        "x_lab_metadata", {}
-    ).get("conversation_id")
-    if not conversation_id_raw:
-        logger.warning("conversation: no conversation_id in message, skipping")
-        await msg.ack()
-        return
-
-    try:
-        conversation_id = uuid.UUID(conversation_id_raw)
-    except ValueError:
-        logger.error("conversation: bad conversation_id %s", conversation_id_raw)
-        await msg.ack()
-        return
+    # Resolve conversation_id: prefer session_key lookup, fall back to explicit UUID
+    conversation_id: uuid.UUID | None = None
+    if not session_key:
+        conv_id_raw = body.get("conversation_id") or body.get("x_lab_metadata", {}).get(
+            "conversation_id"
+        )
+        if not conv_id_raw:
+            logger.warning("conversation: no session_key or conversation_id, skipping")
+            await msg.ack()
+            return
+        try:
+            conversation_id = uuid.UUID(conv_id_raw)
+        except ValueError:
+            logger.error("conversation: bad conversation_id %s", conv_id_raw)
+            await msg.ack()
+            return
 
     try:
         async with AsyncSessionLocal() as db:
+            if session_key:
+                conversation_id = await _upsert_by_session_key(
+                    db, workspace_id, user_id, session_key
+                )
+            if conversation_id is None:
+                await msg.ack()
+                return
             if direction == "request":
                 await _handle_request(db, conversation_id, workspace_id, user_id, body)
             elif direction == "response":
@@ -94,8 +101,47 @@ async def _handle(msg: Msg) -> None:
     await msg.ack()
 
 
+async def _upsert_by_session_key(
+    db,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    session_key: str,
+) -> uuid.UUID:
+    """Find or create a Conversation for this (workspace, session_key) pair."""
+    conv = await db.scalar(
+        select(Conversation).where(
+            Conversation.workspace_id == workspace_id,
+            Conversation.goclaw_session_key == session_key,
+        )
+    )
+    if conv is not None:
+        return conv.id
+
+    # New session — create conversation row
+    conv = Conversation(
+        id=uuid.uuid4(),
+        workspace_id=workspace_id,
+        user_id=user_id,
+        goclaw_session_key=session_key,
+    )
+    db.add(conv)
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Race condition: another message created it concurrently — reload
+        await db.rollback()
+        conv = await db.scalar(
+            select(Conversation).where(
+                Conversation.workspace_id == workspace_id,
+                Conversation.goclaw_session_key == session_key,
+            )
+        )
+        if conv is None:
+            raise
+    return conv.id
+
+
 async def _handle_request(db, conversation_id, workspace_id, user_id, body) -> None:
-    # Upsert conversation row
     conv = await db.get(Conversation, conversation_id)
     if conv is None:
         conv = Conversation(
@@ -106,21 +152,18 @@ async def _handle_request(db, conversation_id, workspace_id, user_id, body) -> N
         db.add(conv)
         await db.flush()
 
-    # Auto-title from first user message content
     if conv.title is None:
         messages: list[dict] = body.get("messages", [])
         for m in reversed(messages):
             if m.get("role") == "user":
                 content = m.get("content") or ""
                 if isinstance(content, list):
-                    # content may be a list of parts
                     content = " ".join(
                         p.get("text", "") for p in content if isinstance(p, dict)
                     )
                 conv.title = str(content)[:60] or None
                 break
 
-    # Extract last user message
     messages: list[dict] = body.get("messages", [])
     last_user_content: str | None = None
     for m in reversed(messages):
@@ -177,17 +220,13 @@ async def _handle_response(db, conversation_id, workspace_id, user_id, body) -> 
     conv.message_count = (conv.message_count or 0) + 1
     conv.last_message_at = datetime.now(UTC)
 
-    # Trigger RAG indexing when threshold is reached
     if conv.message_count >= settings.rag_index_threshold:
         await _trigger_conversation_index(db, conv)
 
 
 async def _trigger_conversation_index(db, conv: Conversation) -> None:
-    from sqlalchemy import select as sa_select
-
-    # Assemble transcript
     result = await db.execute(
-        sa_select(ConversationMessage)
+        select(ConversationMessage)
         .where(ConversationMessage.conversation_id == conv.id)
         .order_by(ConversationMessage.created_at)
     )
@@ -200,17 +239,12 @@ async def _trigger_conversation_index(db, conv: Conversation) -> None:
     transcript = "\n".join(lines)
 
     s3_key = f"{conv.workspace_id}/conversations/{conv.id}.txt"
-
     try:
         from src.services.s3 import upload_fileobj
 
-        await upload_fileobj(
-            io.BytesIO(transcript.encode()),
-            s3_key,
-            "text/plain",
-        )
+        await upload_fileobj(io.BytesIO(transcript.encode()), s3_key, "text/plain")
     except Exception as exc:
-        logger.error("conversation: failed to upload transcript to S3: %s", exc)
+        logger.error("conversation: failed to upload transcript: %s", exc)
         return
 
     try:
@@ -235,7 +269,6 @@ async def _trigger_conversation_index(db, conv: Conversation) -> None:
 
 
 async def start(js: nats.js.JetStreamContext) -> None:
-    # Subscribe to all workspace conversation subjects with a single wildcard consumer
     await js.subscribe(
         "conversation.*",
         durable=_DURABLE,
