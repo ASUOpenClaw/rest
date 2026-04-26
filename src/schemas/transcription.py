@@ -23,7 +23,7 @@ class TranscriptionTaskOut(BaseModel):
     result: dict[str, Any] | None
     processing_time_sec: float | None
     error: str | None
-    transcription_id: uuid.UUID | None
+    transcription_id: uuid.UUID | None = None
     created_at: datetime
     completed_at: datetime | None
 

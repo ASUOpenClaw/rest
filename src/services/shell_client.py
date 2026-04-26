@@ -40,6 +40,30 @@ async def list_cron_jobs(ws_id: str) -> list[dict]:
     return jobs
 
 
+def _parse_schedule(schedule: str) -> dict:
+    """Convert a human-friendly schedule string to a GoClaw schedule object.
+
+    Accepted formats:
+      "every Xh" / "every Xm" / "every Xs" / "every Xd"  → {kind: every, everyMs: ...}
+      5-field cron expression (contains spaces)            → {kind: cron, expr: ...}
+      ISO timestamp (digits only, 13+ chars)               → {kind: at, atMs: ...}
+    """
+    import re
+    s = schedule.strip()
+
+    m = re.fullmatch(r"every\s+(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)", s, re.IGNORECASE)
+    if m:
+        val, unit = float(m.group(1)), m.group(2).lower()
+        factors = {"ms": 1, "s": 1_000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
+        return {"kind": "every", "everyMs": int(val * factors[unit])}
+
+    if re.fullmatch(r"\d{13,}", s):
+        return {"kind": "at", "atMs": int(s)}
+
+    # Assume 5-field cron expression
+    return {"kind": "cron", "expr": s}
+
+
 async def create_cron_job(
     ws_id: str,
     agent_id: str,
@@ -53,8 +77,8 @@ async def create_cron_job(
             headers=_headers(),
             json={
                 "name": name,
-                "expression": schedule,
-                "agent_id": agent_id,
+                "schedule": _parse_schedule(schedule),
+                "agentId": agent_id,
                 "message": message,
                 "lane": "cron",
             },

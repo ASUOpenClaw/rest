@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
-from src.core.deps import CurrentAuth
+from src.core.deps import CurrentAnyAuth
 from src.schemas.transcription import TranscriptionRequest, TranscriptionTaskOut
 from src.services import transcription as transcription_svc
 
@@ -17,7 +17,7 @@ router = APIRouter(
 async def transcribe(
     workspace_id: uuid.UUID,
     body: TranscriptionRequest,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -27,7 +27,7 @@ async def transcribe(
     """
     task = await transcription_svc.enqueue(
         workspace_id=workspace_id,
-        user_id=auth.user.id,
+        user_id=auth.user.id,  # "system" for MCP service tokens
         file_id=body.file_id,
         language=body.language,
         include_timestamps=body.include_timestamps,
@@ -42,6 +42,7 @@ async def transcribe(
         result=task.result,
         processing_time_sec=task.processing_time_sec,
         error=task.error,
+        transcription_id=task.transcription_id,
         created_at=task.created_at,
         completed_at=task.completed_at,
     )
@@ -51,7 +52,7 @@ async def transcribe(
 async def get_transcription_task(
     workspace_id: uuid.UUID,
     task_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     db: AsyncSession = Depends(get_db),
 ):
     """Fetch a past transcription task by ID."""
@@ -70,6 +71,7 @@ async def get_transcription_task(
         result=task.result,
         processing_time_sec=task.processing_time_sec,
         error=task.error,
+        transcription_id=task.transcription_id,
         created_at=task.created_at,
         completed_at=task.completed_at,
     )

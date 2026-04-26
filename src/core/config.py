@@ -61,9 +61,13 @@ class Settings(BaseSettings):
     goclaw_gateway_url: str = ""
     goclaw_gateway_token: str = ""
     goclaw_default_model: str = "qwen3-14b"
+    goclaw_provider_name: str = "litellm"  # Display name for the LiteLLM provider
     # LiteLLM base URL as seen by GoClaw (internal network, e.g. http://litellm:4000/v1)
     goclaw_litellm_url: str = ""
     goclaw_litellm_api_key: str = ""
+    # Public-facing LiteLLM URL shown in GoClaw provider api_base (e.g. http://1.2.3.4:4000)
+    # Falls back to goclaw_litellm_url if not set
+    goclaw_litellm_api_base: str = ""
     # MCP server URL as seen by GoClaw (e.g. http://machine2:8002)
     goclaw_mcp_url: str = ""
 
@@ -96,9 +100,10 @@ class Settings(BaseSettings):
     # MCP tool prefix: tools are registered as "{prefix}__{tool_name}" in GoClaw
     # Default "ws" → ws__rag_search, ws__list_files, etc.
     goclaw_mcp_tool_prefix: str = "ws"
-    # Embedding model name for GoClaw memory search (hybrid FTS + pgvector).
-    # Must match a model routed through LiteLLM (Qwen3-Embedding-0.6B via Ollama).
-    # Leave empty to skip embedding provider registration (memory search disabled).
+    # Embedding model for GoClaw vector memory and knowledge graph.
+    # Must match a model routed through LiteLLM (e.g. Qwen3-Embedding via Ollama).
+    # Stored as settings.embedding.model on the provider and in system-configs.
+    # Leave empty to skip embedding configuration.
     goclaw_embedding_model: str = "text-embedding-qwen3"
     # Agent personality — if set, GoClaw LLM-summons SOUL.md/IDENTITY.md from this description
     goclaw_agent_description: str = ""

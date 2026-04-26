@@ -139,9 +139,20 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
             "X-GoClaw-User-Id": _SYSTEM_USER,
         }
 
-        # 4. Register LiteLLM provider FIRST (agent creation requires a valid provider)
-        provider_name = "litellm"
+        # 4. Register a single LiteLLM provider with embedding settings nested inside.
+        #    No separate embedding provider — GoClaw uses settings.embedding.model
+        #    on the same provider for both chat and embeddings.
+        provider_name = settings.goclaw_provider_name
         if settings.goclaw_litellm_url:
+            provider_settings: dict = {
+                "base_url": settings.goclaw_litellm_url,
+                "api_key": settings.goclaw_litellm_api_key or "no-key",
+            }
+            if settings.goclaw_embedding_model:
+                provider_settings["embedding"] = {
+                    "model": settings.goclaw_embedding_model,
+                    "enabled": True,
+                }
             r = await client.post(
                 f"{base}/v1/providers",
                 headers=tenant_headers,
@@ -149,10 +160,9 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                     "name": provider_name,
                     "provider_type": "openai_compat",
                     "enabled": True,
-                    "settings": {
-                        "base_url": settings.goclaw_litellm_url,
-                        "api_key": settings.goclaw_litellm_api_key or "no-key",
-                    },
+                    "api_base": settings.goclaw_litellm_api_base or settings.goclaw_litellm_url,
+                    "api_key": settings.goclaw_litellm_api_key,
+                    "settings": provider_settings,
                 },
             )
             if not r.is_success:
@@ -160,60 +170,69 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                     "GoClaw provider create failed: %s %s", r.status_code, r.text
                 )
             r.raise_for_status()
-            logger.info("GoClaw LiteLLM provider registered for workspace %s", ws_id)
+            provider_id: str = r.json()["id"]
+            logger.info("GoClaw provider '%s' registered for workspace %s", provider_name, ws_id)
 
-        # 4b. Register embedding provider BEFORE agent creation so the agent body
-        #     can reference it by name. GoClaw validates embedding_provider at create time.
-        if settings.goclaw_litellm_url and settings.goclaw_embedding_model:
-            r = await client.post(
-                f"{base}/v1/providers",
+            # 4a. Verify provider connectivity (non-fatal — log only).
+            rv = await client.post(
+                f"{base}/v1/providers/{provider_id}/verify",
                 headers=tenant_headers,
-                json={
-                    "name": "litellm-embeddings",
-                    "provider_type": "openai_compat",
-                    "enabled": True,
-                    "settings": {
-                        "base_url": settings.goclaw_litellm_url,
-                        "api_key": settings.goclaw_litellm_api_key or "no-key",
-                        "embedding_model": settings.goclaw_embedding_model,
-                    },
-                },
+                json={"model": settings.goclaw_default_model},
             )
-            r.raise_for_status()
-            logger.info(
-                "GoClaw embedding provider registered (model: %s) for workspace %s",
-                settings.goclaw_embedding_model,
-                ws_id,
-            )
+            if rv.is_success:
+                logger.info("GoClaw provider '%s' verified for workspace %s", provider_name, ws_id)
+            else:
+                logger.warning(
+                    "GoClaw provider verify failed (non-fatal): %s %s",
+                    rv.status_code, rv.text[:200],
+                )
+
+            # 4b. Set tenant system-configs for embedding and knowledge graph.
+            #     These tell GoClaw which provider/model to use for vector memory and KG.
+            if settings.goclaw_embedding_model:
+                system_configs = {
+                    "embedding.provider": provider_name,
+                    "embedding.model": settings.goclaw_embedding_model,
+                    "kg.provider": provider_name,
+                    "kg.model": settings.goclaw_embedding_model,
+                    "kg.enabled": "true",
+                }
+                for key, val in system_configs.items():
+                    rc = await client.put(
+                        f"{base}/v1/system-configs/{key}",
+                        headers=tenant_headers,
+                        json={"value": val},
+                    )
+                    if rc.is_success:
+                        logger.info("system-config %s=%s set for workspace %s", key, val, ws_id)
+                    else:
+                        logger.warning(
+                            "system-config %s failed: %s %s", key, rc.status_code, rc.text[:100]
+                        )
 
         # 5. Create agent — memory, personality, and tool policy configured here.
+        #    Embedding is configured at the provider/system level; no embedding_provider
+        #    field on the agent (GoClaw reads it from system-configs).
         agent_body: dict = {
             "agent_key": slug,
             "display_name": ws_name,
             "provider": provider_name,
             "model": settings.goclaw_default_model,
             "agent_type": settings.goclaw_agent_type,
-            # Memory requires embedding provider; only link it when one is registered.
             "memory_config": {"enabled": True},
             # Deny built-in filesystem tools — workspace files live in S3 and are
             # accessed via ws__* MCP tools, not GoClaw's local FS tools.
-            # GoClaw expects the deny list nested inside tools_config (not a top-level
-            # tools_deny field — that one is silently ignored).
             "tools_config": {"deny": ["group:fs"]},
         }
-        if settings.goclaw_embedding_model:
-            agent_body["embedding_provider"] = "litellm-embeddings"
+
+        if settings.goclaw_agent_description:
+            agent_body["description"] = settings.goclaw_agent_description
 
         tts_cfg = _build_tts_config(
             settings.goclaw_tts_provider, settings.goclaw_tts_auto
         )
-        other_cfg: dict = {}
         if tts_cfg:
-            other_cfg["tts"] = tts_cfg
-        if settings.goclaw_agent_description:
-            other_cfg["description"] = settings.goclaw_agent_description
-        if other_cfg:
-            agent_body["other_config"] = other_cfg
+            agent_body["other_config"] = {"tts": tts_cfg}
 
         r = await client.post(
             f"{base}/v1/agents",

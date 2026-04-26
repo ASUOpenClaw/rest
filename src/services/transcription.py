@@ -27,27 +27,29 @@ def _role_gte(role: WorkspaceRole, min_role: WorkspaceRole) -> bool:
 
 async def enqueue(
     workspace_id: uuid.UUID,
-    user_id: uuid.UUID,
+    user_id: uuid.UUID | str,
     file_id: uuid.UUID,
     language: str | None,
     include_timestamps: bool,
     db: AsyncSession,
 ) -> TranscriptionTask:
     """Create TranscriptionTask and publish to NATS. Returns 202 immediately."""
-    member = await db.scalar(
-        select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == workspace_id,
-            WorkspaceMember.user_id == user_id,
+    # Service tokens (MCP) use user_id="system" — bypass member check
+    if str(user_id) != "system":
+        member = await db.scalar(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_id,
+            )
         )
-    )
-    if member is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
-        )
-    if not _role_gte(member.role, WorkspaceRole.member):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Requires member role"
-        )
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+            )
+        if not _role_gte(member.role, WorkspaceRole.member):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Requires member role"
+            )
 
     file = await db.scalar(
         select(File).where(File.id == file_id, File.workspace_id == workspace_id)
@@ -60,7 +62,7 @@ async def enqueue(
     task = TranscriptionTask(
         workspace_id=workspace_id,
         file_id=file_id,
-        requested_by=user_id,
+        requested_by=user_id if str(user_id) != "system" else None,
         language=language,
         include_timestamps=include_timestamps,
         status=TranscriptionStatus.processing,
@@ -87,19 +89,20 @@ async def enqueue(
 async def get_task(
     workspace_id: uuid.UUID,
     task_id: uuid.UUID,
-    user_id: uuid.UUID,
+    user_id: uuid.UUID | str,
     db: AsyncSession,
 ) -> TranscriptionTask:
-    member = await db.scalar(
-        select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == workspace_id,
-            WorkspaceMember.user_id == user_id,
+    if str(user_id) != "system":
+        member = await db.scalar(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_id,
+            )
         )
-    )
-    if member is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
-        )
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+            )
 
     task = await db.scalar(
         select(TranscriptionTask).where(
