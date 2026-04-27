@@ -62,3 +62,11 @@ class ReindexOut(BaseModel):
     file_id: uuid.UUID
     indexing_status: IndexingStatus
     message: str
+
+
+class PublishWorkspaceFileRequest(BaseModel):
+    goclaw_path: str
+    dest_filename: str
+    folder_id: uuid.UUID | None = None
+    description: str | None = None
+    auto_delete: bool = True

@@ -504,3 +504,129 @@ async def reindex_file(
         "indexing_status": IndexingStatus.pending,
         "message": "Reindexing started",
     }
+
+
+# ---------------------------------------------------------------------------
+# Publish workspace file (GoClaw → S3)
+# ---------------------------------------------------------------------------
+
+
+async def publish_workspace_file(
+    workspace_id: uuid.UUID,
+    user: User,
+    goclaw_path: str,
+    dest_filename: str,
+    folder_id: uuid.UUID | None,
+    description: str | None,
+    auto_delete: bool,
+    db: AsyncSession,
+    redis=None,
+) -> FileOut:
+    """
+    Transfer a file from GoClaw workspace storage to our S3.
+
+    Workflow:
+      1. Load the workspace's GoClaw API key from workspace.config.
+      2. GET /v1/storage/files/{goclaw_path}?raw=true from GoClaw.
+      3. Upload bytes to our Garage S3.
+      4. Create File DB record and publish indexing job.
+      5. If auto_delete, delete the file from GoClaw storage (best-effort).
+    """
+    from src.models import Workspace
+    from src.services import goclaw_client as goclaw
+
+    await _require_member(workspace_id, user, WorkspaceRole.member, db)
+
+    workspace = await db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found"
+        )
+
+    api_key: str | None = (workspace.config or {}).get("goclaw_api_key")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Workspace GoClaw credentials not available",
+        )
+
+    if folder_id is not None:
+        folder = await db.scalar(
+            select(Folder).where(
+                Folder.id == folder_id, Folder.workspace_id == workspace_id
+            )
+        )
+        if folder is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found"
+            )
+
+    try:
+        content, content_type = await goclaw.download_storage_file(api_key, goclaw_path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to download file from GoClaw: {exc}",
+        )
+
+    file_id = uuid.uuid4()
+    s3_key = _s3_key(workspace_id, file_id, dest_filename)
+
+    await s3_svc.upload_bytes(content, s3_key, content_type)
+
+    file = File(
+        id=file_id,
+        workspace_id=workspace_id,
+        folder_id=folder_id,
+        original_name=dest_filename,
+        mime_type=content_type,
+        size_bytes=len(content),
+        description=description,
+        s3_key=s3_key,
+        uploaded_by=user.id,
+        indexing_status=IndexingStatus.pending,
+    )
+    db.add(file)
+    await db.commit()
+    await db.refresh(file)
+
+    if redis is not None:
+        try:
+            await redis.hset(
+                f"ws_files:{workspace_id}",
+                str(file_id),
+                json.dumps(
+                    {
+                        "name": dest_filename,
+                        "mime": content_type,
+                        "uploaded_at": int(time.time()),
+                    }
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Failed to register file in workspace context: %s", exc)
+
+    await nats_svc.publish_index_job(
+        job_id=str(uuid.uuid4()),
+        job_type="index",
+        workspace_id=str(workspace_id),
+        file_id=str(file_id),
+        s3_key=s3_key,
+        mime_type=content_type,
+        original_name=dest_filename,
+        folder_id=str(folder_id) if folder_id else None,
+    )
+
+    await meili.index_file(
+        file_id=str(file_id),
+        workspace_id=str(workspace_id),
+        original_name=dest_filename,
+        mime_type=content_type,
+        description=description,
+        folder_path=None,
+    )
+
+    if auto_delete:
+        await goclaw.delete_storage_file(api_key, goclaw_path)
+
+    return await _file_out(file, db)

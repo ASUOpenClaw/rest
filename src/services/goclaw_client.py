@@ -160,7 +160,8 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                     "name": provider_name,
                     "provider_type": "openai_compat",
                     "enabled": True,
-                    "api_base": settings.goclaw_litellm_api_base or settings.goclaw_litellm_url,
+                    "api_base": settings.goclaw_litellm_api_base
+                    or settings.goclaw_litellm_url,
                     "api_key": settings.goclaw_litellm_api_key,
                     "settings": provider_settings,
                 },
@@ -171,21 +172,31 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 )
             r.raise_for_status()
             provider_id: str = r.json()["id"]
-            logger.info("GoClaw provider '%s' registered for workspace %s", provider_name, ws_id)
+            logger.info(
+                "GoClaw provider '%s' registered for workspace %s", provider_name, ws_id
+            )
 
             # 4a. Verify provider connectivity (non-fatal — log only).
-            rv = await client.post(
-                f"{base}/v1/providers/{provider_id}/verify",
-                headers=tenant_headers,
-                json={"model": settings.goclaw_default_model},
-            )
-            if rv.is_success:
-                logger.info("GoClaw provider '%s' verified for workspace %s", provider_name, ws_id)
-            else:
-                logger.warning(
-                    "GoClaw provider verify failed (non-fatal): %s %s",
-                    rv.status_code, rv.text[:200],
+            try:
+                rv = await client.post(
+                    f"{base}/v1/providers/{provider_id}/verify",
+                    headers=tenant_headers,
+                    json={"model": settings.goclaw_default_model},
                 )
+                if rv.is_success:
+                    logger.info(
+                        "GoClaw provider '%s' verified for workspace %s",
+                        provider_name,
+                        ws_id,
+                    )
+                else:
+                    logger.warning(
+                        "GoClaw provider verify failed (non-fatal): %s %s",
+                        rv.status_code,
+                        rv.text[:200],
+                    )
+            except Exception as exc:
+                logger.warning("GoClaw provider verify timed out (non-fatal): %s", exc)
 
             # 4b. Set tenant system-configs for embedding and knowledge graph.
             #     These tell GoClaw which provider/model to use for vector memory and KG.
@@ -204,10 +215,15 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                         json={"value": val},
                     )
                     if rc.is_success:
-                        logger.info("system-config %s=%s set for workspace %s", key, val, ws_id)
+                        logger.info(
+                            "system-config %s=%s set for workspace %s", key, val, ws_id
+                        )
                     else:
                         logger.warning(
-                            "system-config %s failed: %s %s", key, rc.status_code, rc.text[:100]
+                            "system-config %s failed: %s %s",
+                            key,
+                            rc.status_code,
+                            rc.text[:100],
                         )
 
         # 5. Create agent — memory, personality, and tool policy configured here.
@@ -280,14 +296,33 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
                 ws_id,
             )
 
-        # 9. Grant default skills to agent
-        default_skill_ids = await _resolve_default_skill_ids(base, api_key)
-        for skill_id in default_skill_ids:
-            await _grant_skill_to_agent(
-                client, base, tenant_headers, skill_id, agent_id
-            )
+        # 9. Provision default skills into this tenant and grant to agent.
+        #    Skills from GOCLAW_SKILLS_DIR are uploaded directly into the tenant
+        #    (not looked up from master catalog — master uploads are tenant-isolated).
+        #    Built-in/bundled skills (pdf, xlsx, etc.) are public across all tenants
+        #    and are found via the normal catalog lookup.
+        await _provision_skills_to_agent(client, base, tenant_headers, agent_id)
 
-    # 10. Derive a stable MCP service token from workspace_id + shared secret.
+        # 10. Trigger dependency installation for all skills in this tenant.
+        #     Non-fatal — skills still work for deps that are pre-installed.
+        try:
+            r = await client.post(
+                f"{base}/v1/skills/install-deps",
+                headers=tenant_headers,
+            )
+            if r.is_success:
+                logger.info("Skill deps install triggered for workspace %s", ws_id)
+            else:
+                logger.warning(
+                    "Skill deps install failed for workspace %s: %s %s",
+                    ws_id,
+                    r.status_code,
+                    r.text[:200],
+                )
+        except Exception as exc:
+            logger.warning("Skill deps install error for workspace %s: %s", ws_id, exc)
+
+    # 11. Derive a stable MCP service token from workspace_id + shared secret.
     #     HMAC-SHA256: verifiable by MCP server without any Redis lookup.
     #     Format: ws_{ws_id}_{hex_sig} — MCP parses ws_ prefix to extract ws_id.
     service_token = _derive_service_token(ws_id)
@@ -407,6 +442,96 @@ async def _grant_skill_to_agent(
         )
 
 
+async def _provision_skills_to_agent(
+    client: httpx.AsyncClient,
+    base: str,
+    tenant_headers: dict[str, str],
+    agent_id: str,
+) -> None:
+    """
+    Upload skills from GOCLAW_SKILLS_DIR into the tenant's own catalog and grant them
+    to the agent. Then grant any remaining GOCLAW_DEFAULT_SKILLS that are already in
+    the tenant catalog (e.g. built-in pdf/xlsx skills, which are public system skills).
+
+    Master-level skill uploads (sync_skills_from_dir) go to the master tenant and are
+    not visible to per-workspace tenants. Uploading directly here ensures each tenant
+    has its own copy (GoClaw hash-dedup prevents duplicate versions).
+    """
+    default_names = {
+        n.strip() for n in settings.goclaw_default_skills.split(",") if n.strip()
+    }
+    skills_dir = settings.goclaw_skills_dir
+    uploaded_names: set[str] = set()
+
+    # Step A: upload skills from GOCLAW_SKILLS_DIR directly into this tenant.
+    if skills_dir and os.path.isdir(skills_dir):
+        for fname in sorted(os.listdir(skills_dir)):
+            if not fname.endswith(".md"):
+                continue
+            skill_name = fname[:-3]
+            fpath = os.path.join(skills_dir, fname)
+            try:
+                with open(fpath, "rb") as f:
+                    md_content = f.read()
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr("SKILL.md", md_content)
+                buf.seek(0)
+                r = await client.post(
+                    f"{base}/v1/skills/upload",
+                    headers=tenant_headers,
+                    files={"file": (f"{skill_name}.zip", buf, "application/zip")},
+                )
+                if not r.is_success:
+                    logger.warning(
+                        "Tenant skill upload failed for '%s': %s %s",
+                        skill_name,
+                        r.status_code,
+                        r.text[:200],
+                    )
+                    continue
+                skill_id = r.json().get("id", "")
+                if skill_id:
+                    await _grant_skill_to_agent(
+                        client, base, tenant_headers, skill_id, agent_id
+                    )
+                    uploaded_names.add(skill_name)
+                    logger.info(
+                        "Uploaded + granted skill '%s' to agent %s",
+                        skill_name,
+                        agent_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Error uploading skill '%s' to tenant: %s", skill_name, exc
+                )
+
+    # Step B: for GOCLAW_DEFAULT_SKILLS not covered by the dir upload, look them up
+    # in the tenant catalog (covers public built-in skills like pdf, xlsx, docx, pptx).
+    remaining = default_names - uploaded_names
+    if not remaining:
+        return
+    try:
+        r = await client.get(f"{base}/v1/skills", headers=tenant_headers)
+        if not r.is_success:
+            logger.warning("Could not list tenant skills: %s", r.status_code)
+            return
+        skills = r.json() if isinstance(r.json(), list) else r.json().get("items", [])
+        name_to_id = {s["name"]: s["id"] for s in skills}
+        for name in remaining:
+            if name in name_to_id:
+                await _grant_skill_to_agent(
+                    client, base, tenant_headers, name_to_id[name], agent_id
+                )
+            else:
+                logger.warning(
+                    "Default skill '%s' not found in tenant catalog (not uploaded and not builtin)",
+                    name,
+                )
+    except Exception as exc:
+        logger.warning("Error granting built-in default skills: %s", exc)
+
+
 async def _resolve_default_skill_ids(base: str, api_key: str) -> list[str]:
     """Resolve GOCLAW_DEFAULT_SKILLS names → IDs by listing tenant skills."""
     names = [n.strip() for n in settings.goclaw_default_skills.split(",") if n.strip()]
@@ -486,10 +611,11 @@ async def revoke_skill(api_key: str, agent_id: str, skill_id: str) -> None:
 async def sync_skills_from_dir() -> list[dict]:
     """
     Upload/update each .md file in GOCLAW_SKILLS_DIR as a GoClaw skill ZIP.
-    Returns a list of {name, skill_id, status: "uploaded"|"already_exists"|"error"}.
+    Returns a list of {name, skill_id, status: "uploaded"|"updated"|"unchanged"|"error"}.
 
     ZIP format: single SKILL.md at root, 20 MB max.
-    Idempotent: if a skill with same name already exists, skip (status=already_exists).
+    Always attempts upload — GoClaw's hash-based idempotency ensures no new version
+    is created when the SKILL.md content is unchanged. Changed content gets a new version.
     """
     skills_dir = settings.goclaw_skills_dir
     if not skills_dir or not os.path.isdir(skills_dir):
@@ -498,7 +624,7 @@ async def sync_skills_from_dir() -> list[dict]:
     base = settings.goclaw_gateway_url.rstrip("/")
     results: list[dict] = []
 
-    # Load existing skills to avoid duplicates
+    # Load existing skills so we can report "updated" vs "uploaded"
     try:
         existing = await list_skills()
         existing_names = {s["name"]: s["id"] for s in existing}
@@ -511,16 +637,7 @@ async def sync_skills_from_dir() -> list[dict]:
             continue
         fpath = os.path.join(skills_dir, fname)
         skill_name = fname[:-3]  # strip .md
-
-        if skill_name in existing_names:
-            results.append(
-                {
-                    "name": skill_name,
-                    "skill_id": existing_names[skill_name],
-                    "status": "already_exists",
-                }
-            )
-            continue
+        is_update = skill_name in existing_names
 
         try:
             with open(fpath, "rb") as f:
@@ -539,17 +656,25 @@ async def sync_skills_from_dir() -> list[dict]:
                     files={"file": (f"{skill_name}.zip", buf, "application/zip")},
                 )
                 r.raise_for_status()
-                skill_id = r.json().get("id", "")
-                results.append(
-                    {"name": skill_name, "skill_id": skill_id, "status": "uploaded"}
+                resp = r.json()
+                skill_id = resp.get("id") or existing_names.get(skill_name, "")
+                # GoClaw returns skills_skipped=1 when content hash is unchanged
+                unchanged = resp.get("skills_skipped", 0) > 0
+                status = (
+                    "unchanged"
+                    if unchanged
+                    else ("updated" if is_update else "uploaded")
                 )
-                logger.info("Uploaded skill '%s' → %s", skill_name, skill_id)
+                results.append(
+                    {"name": skill_name, "skill_id": skill_id, "status": status}
+                )
+                logger.info("Synced skill '%s' → %s (%s)", skill_name, skill_id, status)
         except Exception as exc:
-            logger.error("Failed to upload skill '%s': %s", skill_name, exc)
+            logger.error("Failed to sync skill '%s': %s", skill_name, exc)
             results.append(
                 {
                     "name": skill_name,
-                    "skill_id": None,
+                    "skill_id": existing_names.get(skill_name),
                     "status": "error",
                     "error": str(exc),
                 }
@@ -597,6 +722,127 @@ def _build_tts_config(provider: str, auto: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # Plugin (external MCP server) management
 # ---------------------------------------------------------------------------
+
+
+async def _list_storage_files(
+    client: httpx.AsyncClient, base: str, headers: dict, path: str = ""
+) -> list[dict]:
+    """Return the files[] list from GET /v1/storage/files?path={path}."""
+    r = await client.get(
+        f"{base}/v1/storage/files",
+        headers=headers,
+        params={"path": path} if path else {},
+    )
+    if not r.is_success:
+        return []
+    return r.json().get("files", [])
+
+
+async def resolve_storage_path(api_key: str, path: str) -> str:
+    """
+    Given a goclaw_path that may be a bare filename (e.g. "grades.xlsx"),
+    return the full storage-relative path (e.g. "ws/<user_id>/grades.xlsx").
+
+    Resolution order:
+      1. Try the path as-is (exact match via HEAD/GET).
+      2. Search ws/*/ subdirectories for a file with the same basename.
+
+    Raises ValueError if the file cannot be found.
+    """
+    base = settings.goclaw_gateway_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    filename = path.split("/")[-1]
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 1. Check exact path
+        r = await client.get(
+            f"{base}/v1/storage/files/{path}", headers=headers, params={"raw": "true"}
+        )
+        if r.is_success:
+            return path
+
+        # 2. List ws/ subdirectories and search each for the filename
+        ws_entries = await _list_storage_files(client, base, headers, "ws")
+        for entry in ws_entries:
+            if not entry.get("isDir"):
+                continue
+            user_dir = entry["path"]  # e.g. "ws/66e87335-..."
+            children = await _list_storage_files(client, base, headers, user_dir)
+            for child in children:
+                if not child.get("isDir") and child.get("name") == filename:
+                    return child["path"]
+
+    raise ValueError(f"File '{path}' not found in GoClaw workspace storage")
+
+
+async def download_storage_file(api_key: str, path: str) -> tuple[bytes, str]:
+    """
+    Download a file from GoClaw workspace storage (/app/workspace/).
+    GET /v1/storage/files/{path}?raw=true → (content_bytes, content_type).
+
+    If the exact path returns 404, automatically searches ws/*/ subdirectories
+    for a file with the same basename (handles bare filenames from agent exec).
+    """
+    base = settings.goclaw_gateway_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.get(
+            f"{base}/v1/storage/files/{path}",
+            headers=headers,
+            params={"raw": "true"},
+        )
+        if r.status_code == 404:
+            # Bare filename — search ws/*/ for it
+            filename = path.split("/")[-1]
+            ws_entries = await _list_storage_files(client, base, headers, "ws")
+            resolved = None
+            for entry in ws_entries:
+                if not entry.get("isDir"):
+                    continue
+                children = await _list_storage_files(
+                    client, base, headers, entry["path"]
+                )
+                for child in children:
+                    if not child.get("isDir") and child.get("name") == filename:
+                        resolved = child["path"]
+                        break
+                if resolved:
+                    break
+            if not resolved:
+                r.raise_for_status()  # re-raise the original 404
+            r = await client.get(
+                f"{base}/v1/storage/files/{resolved}",
+                headers=headers,
+                params={"raw": "true"},
+            )
+        r.raise_for_status()
+        content_type = (
+            r.headers.get("content-type", "application/octet-stream")
+            .split(";")[0]
+            .strip()
+        )
+        return r.content, content_type
+
+
+async def delete_storage_file(api_key: str, path: str) -> None:
+    """
+    Delete a file from GoClaw workspace storage (best-effort, non-fatal).
+    DELETE /v1/storage/files/{path}
+    """
+    base = settings.goclaw_gateway_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.delete(f"{base}/v1/storage/files/{path}", headers=headers)
+            if not r.is_success:
+                logger.warning(
+                    "GoClaw delete_storage_file %s failed: %s %s",
+                    path,
+                    r.status_code,
+                    r.text[:200],
+                )
+    except Exception as exc:
+        logger.warning("GoClaw delete_storage_file error for %s: %s", path, exc)
 
 
 async def register_plugin(

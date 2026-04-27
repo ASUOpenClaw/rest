@@ -49,6 +49,7 @@ def _parse_schedule(schedule: str) -> dict:
       ISO timestamp (digits only, 13+ chars)               → {kind: at, atMs: ...}
     """
     import re
+
     s = schedule.strip()
 
     m = re.fullmatch(r"every\s+(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)", s, re.IGNORECASE)

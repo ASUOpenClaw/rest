@@ -13,6 +13,7 @@ from src.schemas.file import (
     FileListOut,
     FileOut,
     FilePatchRequest,
+    PublishWorkspaceFileRequest,
     ReindexOut,
 )
 from src.services import file as file_svc
@@ -83,6 +84,31 @@ async def list_files(
         db=db,
     )
     return FileListOut(items=items, total=total, page=page, per_page=per_page)
+
+
+@router.post(
+    "/publish-workspace-file",
+    response_model=FileOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def publish_workspace_file(
+    workspace_id: uuid.UUID,
+    body: PublishWorkspaceFileRequest,
+    auth: CurrentAnyAuth,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    return await file_svc.publish_workspace_file(
+        workspace_id=workspace_id,
+        user=auth.user,
+        goclaw_path=body.goclaw_path,
+        dest_filename=body.dest_filename,
+        folder_id=body.folder_id,
+        description=body.description,
+        auto_delete=body.auto_delete,
+        db=db,
+        redis=redis,
+    )
 
 
 @router.get("/{file_id}", response_model=FileOut)
