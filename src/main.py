@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from src.api import router
+from src.api.internal import router as internal_router
 from src.core.config import settings
 from src.core.db import engine
 from src.core.logging import configure_logging
@@ -86,3 +87,4 @@ app.add_middleware(RequestIDMiddleware)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 app.include_router(router)
+app.include_router(internal_router)

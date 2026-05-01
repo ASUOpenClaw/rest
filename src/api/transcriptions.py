@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
-from src.core.deps import CurrentAuth
+from src.core.deps import CurrentAnyAuth
 from src.models import File, Transcription, WorkspaceMember
 from src.schemas.transcription import TranscriptionListOut, TranscriptionOut
 from src.services.file import _file_out
@@ -34,7 +34,7 @@ async def _transcription_out(t: Transcription, db: AsyncSession) -> Transcriptio
 @router.get("", response_model=TranscriptionListOut)
 async def list_transcriptions(
     workspace_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -79,7 +79,7 @@ async def list_transcriptions(
 async def get_transcription_record(
     workspace_id: uuid.UUID,
     transcription_id: uuid.UUID,
-    auth: CurrentAuth,
+    auth: CurrentAnyAuth,
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single transcription with audio + transcript file details."""
