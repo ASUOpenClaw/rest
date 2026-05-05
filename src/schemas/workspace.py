@@ -1,14 +1,45 @@
 import uuid
 from datetime import datetime
-from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.models.workspace import WorkspaceRole
 
 # ---------------------------------------------------------------------------
 # Workspace
 # ---------------------------------------------------------------------------
+
+
+class WorkspacePlugin(BaseModel):
+    """External MCP server registered as a plugin for this workspace."""
+
+    id: str
+    name: str
+    url: str
+    transport: str = "streamable-http"
+    tool_prefix: str | None = None
+    goclaw_mcp_server_id: str
+
+
+class WorkspaceConfig(BaseModel):
+    """Typed representation of the workspace JSONB config column.
+
+    The ``goclaw_*`` fields are written by the provisioning service and are
+    read-only from a client perspective.  Plugins are managed via the
+    dedicated ``/plugins`` endpoints rather than being set here directly.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    # GoClaw provisioning — set internally on workspace creation
+    goclaw_tenant_id: str | None = None
+    goclaw_api_key: str | None = None
+    goclaw_agent_id: str | None = None
+    goclaw_agent_key: str | None = None
+    goclaw_mcp_service_token: str | None = None
+
+    # External MCP server plugins — managed via /plugins endpoints
+    plugins: list[WorkspacePlugin] = Field(default_factory=list)
 
 
 class WorkspaceStats(BaseModel):
@@ -22,13 +53,13 @@ class WorkspaceOut(BaseModel):
     name: str
     description: str | None
     system_prompt: str | None
-    config: dict[str, Any]
+    config: WorkspaceConfig
     created_by: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
     stats: WorkspaceStats
 
-    model_config = {"from_attributes": True}
+    model_config = ConfigDict(from_attributes=True)
 
 
 class WorkspaceListItem(BaseModel):
@@ -52,14 +83,14 @@ class WorkspaceCreateRequest(BaseModel):
     name: str = Field(..., max_length=256)
     description: str | None = None
     system_prompt: str | None = None
-    config: dict[str, Any] = {}
+    config: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
 
 
 class WorkspacePatchRequest(BaseModel):
     name: str | None = Field(default=None, max_length=256)
     description: str | None = None
     system_prompt: str | None = None
-    config: dict[str, Any] | None = None
+    config: WorkspaceConfig | None = None
 
 
 # ---------------------------------------------------------------------------
