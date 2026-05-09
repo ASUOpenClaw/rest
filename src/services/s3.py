@@ -32,15 +32,6 @@ async def upload_fileobj(fileobj: BinaryIO, s3_key: str, content_type: str) -> N
         )
 
 
-async def generate_presigned_download_url(s3_key: str, expires_in: int = 3600) -> str:
-    async with _client() as s3:
-        return await s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": settings.s3_bucket, "Key": s3_key},
-            ExpiresIn=expires_in,
-        )
-
-
 async def delete_object(s3_key: str) -> None:
     async with _client() as s3:
         await s3.delete_object(Bucket=settings.s3_bucket, Key=s3_key)
@@ -71,6 +62,14 @@ async def object_exists(s3_key: str) -> bool:
             return True
         except ClientError:
             return False
+
+
+async def iter_object(s3_key: str, chunk_size: int = 65536):
+    """Async generator: stream an S3 object in chunks without loading it fully into memory."""
+    async with _client() as s3:
+        response = await s3.get_object(Bucket=settings.s3_bucket, Key=s3_key)
+        async for chunk in response["Body"].iter_chunks(chunk_size=chunk_size):
+            yield chunk
 
 
 async def list_objects_prefix(prefix: str) -> list[str]:

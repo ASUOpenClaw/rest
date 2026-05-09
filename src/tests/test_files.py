@@ -106,7 +106,7 @@ async def test_update_file_description(
     assert patch_resp.json()["description"] == "Updated description"
 
 
-async def test_get_download_url(
+async def test_download_file(
     client: AsyncClient, auth_headers: dict, test_workspace: Workspace
 ):
     upload_resp = await client.post(
@@ -121,7 +121,7 @@ async def test_get_download_url(
         headers=auth_headers,
     )
     assert resp.status_code == 200
-    assert "url" in resp.json()
+    assert "attachment" in resp.headers.get("content-disposition", "")
 
 
 async def test_delete_file(

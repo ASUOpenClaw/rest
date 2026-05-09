@@ -51,13 +51,6 @@ class FilePatchRequest(BaseModel):
     security_mode: FileSecurityMode | None = None
 
 
-class DownloadUrlOut(BaseModel):
-    url: str
-    expires_in: int
-    filename: str
-    content_type: str
-
-
 class ReindexOut(BaseModel):
     file_id: uuid.UUID
     indexing_status: IndexingStatus

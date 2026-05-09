@@ -106,6 +106,11 @@ async def fake_redis():
 # ---------------------------------------------------------------------------
 
 
+async def _fake_iter_object(*_a, **_kw):
+    return
+    yield  # makes this an async generator that produces no chunks
+
+
 @pytest.fixture(autouse=True)
 def _mock_external_services():
     """Prevent real NATS / Meilisearch / S3 calls in every test."""
@@ -116,10 +121,7 @@ def _mock_external_services():
         patch("src.services.meili.close", new=AsyncMock()),
         patch("src.services.s3.upload_fileobj", new=AsyncMock()),
         patch("src.services.s3.delete_object", new=AsyncMock()),
-        patch(
-            "src.services.s3.generate_presigned_download_url",
-            new=AsyncMock(return_value="http://fake-presigned-url"),
-        ),
+        patch("src.services.s3.iter_object", new=_fake_iter_object),
     ):
         yield
 

@@ -121,7 +121,11 @@ async def update_workspace(
         name=body.name,
         description=body.description,
         system_prompt=body.system_prompt,
-        config=body.config.model_dump(exclude_none=True) if body.config is not None else None,
+        config=(
+            body.config.model_dump(exclude_none=True)
+            if body.config is not None
+            else None
+        ),
         db=db,
     )
     return _ws_out(ws, stats)

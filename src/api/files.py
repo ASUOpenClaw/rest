@@ -1,15 +1,17 @@
+import urllib.parse
 import uuid
 from typing import Annotated, Literal
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
-from src.core.deps import CurrentAnyAuth, CurrentAuth
+from src.core.deps import CurrentAnyAuth, CurrentAuth, require_file_access
 from src.core.redis import get_redis
+from src.models.file_permission import FilePermissionLevel
 from src.schemas.file import (
-    DownloadUrlOut,
     FileListOut,
     FileOut,
     FilePatchRequest,
@@ -17,6 +19,7 @@ from src.schemas.file import (
     ReindexOut,
 )
 from src.services import file as file_svc
+from src.services import s3 as s3_svc
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/files", tags=["files"])
 
@@ -143,22 +146,22 @@ async def update_file(
     )
 
 
-@router.get("/{file_id}/download", response_model=DownloadUrlOut)
-async def get_download_url(
+@router.get("/{file_id}/download")
+async def download_file(
     workspace_id: uuid.UUID,
     file_id: uuid.UUID,
-    auth: CurrentAnyAuth,
-    expires_in: int = Query(default=3600, ge=60, le=86400),
-    db: AsyncSession = Depends(get_db),
+    access: Annotated[tuple, Depends(require_file_access(FilePermissionLevel.read))],
 ):
-    data = await file_svc.get_download_url(
-        workspace_id=workspace_id,
-        file_id=file_id,
-        user=auth.user,
-        db=db,
-        expires_in=expires_in,
+    _, file, _ = access
+    encoded_name = urllib.parse.quote(file.original_name, safe="")
+    return StreamingResponse(
+        s3_svc.iter_object(file.s3_key),
+        media_type=file.mime_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+            "Content-Length": str(file.size_bytes),
+        },
     )
-    return DownloadUrlOut(**data)
 
 
 @router.post(

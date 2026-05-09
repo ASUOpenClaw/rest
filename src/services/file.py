@@ -431,39 +431,6 @@ async def delete_file(
 
 
 # ---------------------------------------------------------------------------
-# Download presigned URL
-# ---------------------------------------------------------------------------
-
-
-async def get_download_url(
-    workspace_id: uuid.UUID,
-    file_id: uuid.UUID,
-    user: User,
-    db: AsyncSession,
-    expires_in: int = 3600,
-) -> dict:
-    await _require_member(workspace_id, user, WorkspaceRole.guest, db)
-
-    file = await db.scalar(
-        select(File).where(File.id == file_id, File.workspace_id == workspace_id)
-    )
-    if file is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="File not found"
-        )
-
-    url = await s3_svc.generate_presigned_download_url(
-        file.s3_key, expires_in=expires_in
-    )
-    return {
-        "url": url,
-        "expires_in": expires_in,
-        "filename": file.original_name,
-        "content_type": file.mime_type,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Reindex
 # ---------------------------------------------------------------------------
 
