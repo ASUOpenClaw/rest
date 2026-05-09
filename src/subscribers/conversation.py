@@ -142,6 +142,7 @@ async def _upsert_by_session_key(
 
 
 async def _handle_request(db, conversation_id, workspace_id, user_id, body) -> None:
+    # Shell publishes body as {"role": "user", "content": "..."} — a bare message object.
     conv = await db.get(Conversation, conversation_id)
     if conv is None:
         conv = Conversation(
@@ -152,42 +153,26 @@ async def _handle_request(db, conversation_id, workspace_id, user_id, body) -> N
         db.add(conv)
         await db.flush()
 
-    if conv.title is None:
-        messages: list[dict] = body.get("messages", [])
-        for m in reversed(messages):
-            if m.get("role") == "user":
-                content = m.get("content") or ""
-                if isinstance(content, list):
-                    content = " ".join(
-                        p.get("text", "") for p in content if isinstance(p, dict)
-                    )
-                conv.title = str(content)[:60] or None
-                break
+    content: str = body.get("content") or ""
+    if isinstance(content, list):
+        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
 
-    messages: list[dict] = body.get("messages", [])
-    last_user_content: str | None = None
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            raw_content = m.get("content") or ""
-            if isinstance(raw_content, list):
-                last_user_content = " ".join(
-                    p.get("text", "") for p in raw_content if isinstance(p, dict)
-                )
-            else:
-                last_user_content = str(raw_content)
-            break
+    if conv.title is None:
+        conv.title = str(content)[:60] or None
 
     db.add(
         ConversationMessage(
             conversation_id=conversation_id,
             role=MessageRole.user,
-            content=last_user_content,
+            content=content or None,
             raw=body,
         )
     )
 
 
 async def _handle_response(db, conversation_id, workspace_id, user_id, body) -> None:
+    # Shell publishes body as {"role": "assistant", "content": "..."} — a bare message object.
+    # model/usage/finish_reason are not included in this format.
     conv = await db.get(Conversation, conversation_id)
     if conv is None:
         logger.warning(
@@ -195,24 +180,13 @@ async def _handle_response(db, conversation_id, workspace_id, user_id, body) -> 
         )
         return
 
-    choices: list[dict] = body.get("choices", [])
-    first_choice = choices[0] if choices else {}
-    message = first_choice.get("message", {})
-    content: str | None = message.get("content")
-    finish_reason: str | None = first_choice.get("finish_reason")
-    model: str | None = body.get("model")
-    usage: dict = body.get("usage", {})
+    content: str | None = body.get("content") or None
 
     db.add(
         ConversationMessage(
             conversation_id=conversation_id,
             role=MessageRole.assistant,
             content=content,
-            model=model,
-            finish_reason=finish_reason,
-            prompt_tokens=usage.get("prompt_tokens"),
-            completion_tokens=usage.get("completion_tokens"),
-            total_tokens=usage.get("total_tokens"),
             raw=body,
         )
     )
