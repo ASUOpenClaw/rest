@@ -147,6 +147,9 @@ async def reprovision_workspace(
     owner_member = owner_result.scalar_one_or_none()
     owner_user_id = str(owner_member.user_id) if owner_member else str(auth.user.id)
 
+    from src.services import shell_client
+    from src.services.workspace import _build_agent_instructions
+
     goclaw = await goclaw_client.provision_workspace(str(ws.id), ws.name)
     ws.config = {**(ws.config or {}), **goclaw}
     await db.commit()
@@ -163,4 +166,19 @@ async def reprovision_workspace(
             }
         ),
     )
+    agent_key = goclaw.get("goclaw_agent_key", "")
+    if agent_key and settings.shell_service_url and settings.shell_service_key:
+        try:
+            instructions = _build_agent_instructions(
+                goclaw.get("goclaw_mcp_service_token", "")
+            )
+            await shell_client.set_agent_file(
+                str(ws.id), agent_key, "CAPABILITIES.md", instructions
+            )
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Failed to set agent CAPABILITIES.md for workspace %s: %s", ws.id, exc
+            )
     return {"status": "provisioned", "workspace_id": str(workspace_id), **goclaw}

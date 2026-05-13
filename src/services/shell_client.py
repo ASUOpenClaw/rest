@@ -149,3 +149,29 @@ async def delete_agent(ws_id: str, agent_id: str) -> None:
             headers=_headers(),
         )
         r.raise_for_status()
+
+
+async def set_agent_file(
+    ws_id: str, agent_id: str, file_name: str, content: str
+) -> dict:
+    """Write an agent-level context file via the Shell WS-RPC bridge.
+
+    The file is injected into the agent's system prompt on every turn.
+    Shell must have ws_creds:{ws_id} in Redis before this is called.
+    agent_id must be the GoClaw agent slug (agent_key), not the UUID.
+    """
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        r = await client.put(
+            f"{_base()}/api/workspaces/{ws_id}/agents/{agent_id}/files/{file_name}",
+            headers=_headers(),
+            json={"content": content},
+        )
+        if not r.is_success:
+            logger.warning(
+                "set_agent_file failed: %s %s — body: %s",
+                r.status_code,
+                r.url,
+                r.text[:500],
+            )
+        r.raise_for_status()
+        return r.json()

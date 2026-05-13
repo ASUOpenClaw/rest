@@ -21,7 +21,7 @@ from src.models import (
     WorkspaceRole,
 )
 from src.schemas.workspace import WorkspaceStats
-from src.services import goclaw_client, meili
+from src.services import goclaw_client, meili, shell_client
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,39 @@ _ROLE_ORDER = [
     WorkspaceRole.admin,
     WorkspaceRole.owner,
 ]
+
+
+def _build_agent_instructions(service_token: str) -> str:
+    """Return the CAPABILITIES.md content written to every new workspace agent.
+
+    This file is injected by GoClaw into the system prompt on every turn, so
+    the agent always knows its tool rules and the static service token without
+    Shell having to inject them per-session.
+    """
+    token_section = (
+        f"\n## Service Token\n\n"
+        f"`[SERVICE_CTX: mcp_service={service_token}]`\n\n"
+        f"For scheduled/automated tasks (cron, wake) pass this token as `ctx_token` "
+        f"to all `ws__` tool calls instead of the session token.\n"
+        if service_token
+        else ""
+    )
+    return f"""## Workspace Tool Rules
+
+**MANDATORY** — always follow these rules without being asked:
+
+- **NEVER** use built-in `read_file`, `write_file`, `list_files`, or `search` tools \
+for workspace content. Use `ws__*` MCP tools exclusively.
+- **ALWAYS** call `ws__rag_search` when the user asks about document contents, \
+asks a question that could be answered from uploaded files, or asks you to find something.
+- **ALWAYS** call `ws__list_files` when the user asks what files are available \
+or what's in the workspace.
+- **ALWAYS** use `ws__create_file` to save any text report, summary, or generated content.
+- Your per-session ctx_token is in `[WORKSPACE_CTX: mcp_ctx=...]` injected into your \
+context at the start of each session; pass it verbatim to every `ws__` tool call.
+- When a file is listed as `⚠ JUST UPLOADED`, immediately acknowledge it and offer \
+to search or analyse it — do not wait to be asked.
+{token_section}"""
 
 
 def _role_gte(role: WorkspaceRole, min_role: WorkspaceRole) -> bool:
@@ -122,6 +155,29 @@ async def create_workspace(
                         }
                     ),
                 )
+                # Write behavioral instructions + static service token to the
+                # agent as a context file. GoClaw injects context files into
+                # the system prompt on every turn, so the agent always has
+                # these rules without Shell needing to inject them per-session.
+                service_token = goclaw.get("goclaw_mcp_service_token", "")
+                agent_key = goclaw.get("goclaw_agent_key", "")
+                if (
+                    agent_key
+                    and settings.shell_service_url
+                    and settings.shell_service_key
+                ):
+                    instructions = _build_agent_instructions(service_token)
+                    try:
+                        await shell_client.set_agent_file(
+                            str(ws.id), agent_key, "CAPABILITIES.md", instructions
+                        )
+                        logger.info("Agent CAPABILITIES.md set for workspace %s", ws.id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to set agent CAPABILITIES.md for workspace %s: %s",
+                            ws.id,
+                            exc,
+                        )
         except Exception as exc:
             logger.error(
                 "GoClaw provisioning failed for workspace %s: %s: %s",
