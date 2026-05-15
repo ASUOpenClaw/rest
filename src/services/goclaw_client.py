@@ -235,6 +235,7 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
             "provider": provider_name,
             "model": settings.goclaw_default_model,
             "agent_type": settings.goclaw_agent_type,
+            "context_window": 150000,
             "memory_config": {"enabled": True},
             # Deny built-in filesystem tools — workspace files live in S3 and are
             # accessed via ws__* MCP tools, not GoClaw's local FS tools.
@@ -247,8 +248,10 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
         tts_cfg = _build_tts_config(
             settings.goclaw_tts_provider, settings.goclaw_tts_auto
         )
+        other_cfg: dict = {}  # "prompt_mode": "task"
         if tts_cfg:
-            agent_body["other_config"] = {"tts": tts_cfg}
+            other_cfg["tts"] = tts_cfg
+        agent_body["other_config"] = other_cfg
 
         r = await client.post(
             f"{base}/v1/agents",
@@ -358,7 +361,7 @@ async def notify_file_uploaded(
         return
     base = settings.goclaw_gateway_url.rstrip("/")
     system_msg = (
-        f"[WORKSPACE_CTX: mcp_ctx={mcp_service_token}] "
+        f"[WORKSPACE_CTX: ctx_token={mcp_service_token}] "
         "Always pass this exact token as ctx_token in every tool call. Never modify it."
     )
     user_msg = (

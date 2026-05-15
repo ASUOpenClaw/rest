@@ -5,14 +5,13 @@ Consumes conversation dumps published by the Shell and writes to:
   - conversations (upsert by goclaw_session_key)
   - conversation_messages (insert)
 
-The Shell now publishes a top-level `session_key` field on every message.
-The subscriber uses (workspace_id, goclaw_session_key) as the stable identity
-for a conversation — creating a new row the first time a session is seen.
+On direction=response the envelope may include:
+  - events: list of structured turn events (tool_call, tool_result, thinking, chunk)
+  - goclaw_history: full chat.history payload from GoClaw fetched after run.completed
 
-Legacy messages that carry a `conversation_id` UUID in the body are still handled
-for backwards compatibility.
-
-Parse errors are always ACKed. DB errors cause NACK for redelivery.
+Sync logic: after saving the response turn we compare our local message count
+against len(goclaw_history). If they differ the entire conversation is rewritten
+from GoClaw's authoritative history.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from datetime import UTC, datetime
 
 import nats.js
 from nats.aio.msg import Msg
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from src.core.config import settings
@@ -51,6 +50,8 @@ async def _handle(msg: Msg) -> None:
     user_id_raw: str = event.get("user_id", "")
     session_key: str | None = event.get("session_key") or None
     body: dict = event.get("body", {})
+    turn_events: list[dict] = event.get("events", [])
+    goclaw_history = event.get("goclaw_history")  # None or list or {"messages": [...]}
 
     try:
         workspace_id = uuid.UUID(workspace_id_raw)
@@ -60,7 +61,6 @@ async def _handle(msg: Msg) -> None:
         await msg.ack()
         return
 
-    # Resolve conversation_id: prefer session_key lookup, fall back to explicit UUID
     conversation_id: uuid.UUID | None = None
     if not session_key:
         conv_id_raw = body.get("conversation_id") or body.get("x_lab_metadata", {}).get(
@@ -89,7 +89,15 @@ async def _handle(msg: Msg) -> None:
             if direction == "request":
                 await _handle_request(db, conversation_id, workspace_id, user_id, body)
             elif direction == "response":
-                await _handle_response(db, conversation_id, workspace_id, user_id, body)
+                await _handle_response(
+                    db,
+                    conversation_id,
+                    workspace_id,
+                    user_id,
+                    body,
+                    turn_events,
+                    goclaw_history,
+                )
             else:
                 logger.warning("conversation: unknown direction %s", direction)
             await db.commit()
@@ -107,7 +115,6 @@ async def _upsert_by_session_key(
     user_id: uuid.UUID,
     session_key: str,
 ) -> uuid.UUID:
-    """Find or create a Conversation for this (workspace, session_key) pair."""
     conv = await db.scalar(
         select(Conversation).where(
             Conversation.workspace_id == workspace_id,
@@ -117,7 +124,6 @@ async def _upsert_by_session_key(
     if conv is not None:
         return conv.id
 
-    # New session — create conversation row
     conv = Conversation(
         id=uuid.uuid4(),
         workspace_id=workspace_id,
@@ -128,7 +134,6 @@ async def _upsert_by_session_key(
     try:
         await db.flush()
     except IntegrityError:
-        # Race condition: another message created it concurrently — reload
         await db.rollback()
         conv = await db.scalar(
             select(Conversation).where(
@@ -142,7 +147,6 @@ async def _upsert_by_session_key(
 
 
 async def _handle_request(db, conversation_id, workspace_id, user_id, body) -> None:
-    # Shell publishes body as {"role": "user", "content": "..."} — a bare message object.
     conv = await db.get(Conversation, conversation_id)
     if conv is None:
         conv = Conversation(
@@ -170,32 +174,150 @@ async def _handle_request(db, conversation_id, workspace_id, user_id, body) -> N
     )
 
 
-async def _handle_response(db, conversation_id, workspace_id, user_id, body) -> None:
-    # Shell publishes body as {"role": "assistant", "content": "..."} — a bare message object.
-    # model/usage/finish_reason are not included in this format.
+async def _handle_response(
+    db,
+    conversation_id,
+    workspace_id,
+    user_id,
+    body,
+    turn_events: list[dict],
+    goclaw_history,
+) -> None:
     conv = await db.get(Conversation, conversation_id)
     if conv is None:
-        logger.warning(
-            "conversation: response for unknown conversation %s", conversation_id
-        )
+        logger.warning("conversation: response for unknown conversation %s", conversation_id)
         return
 
-    content: str | None = body.get("content") or None
+    history_messages = _extract_history_messages(goclaw_history) if goclaw_history is not None else []
 
-    db.add(
-        ConversationMessage(
-            conversation_id=conversation_id,
-            role=MessageRole.assistant,
-            content=content,
-            raw=body,
+    if history_messages:
+        # GoClaw history available — always use it as the source of truth.
+        await _rewrite_from_history(db, conversation_id, history_messages)
+    elif turn_events:
+        # Best-effort from structured events (fallback when chat.history failed).
+        await _save_turn_events(db, conversation_id, body, turn_events)
+    else:
+        # Legacy: no events and no history — save plain assistant message.
+        db.add(
+            ConversationMessage(
+                conversation_id=conversation_id,
+                role=MessageRole.assistant,
+                content=body.get("content") or None,
+                raw=body,
+            )
         )
-    )
 
     conv.message_count = (conv.message_count or 0) + 1
     conv.last_message_at = datetime.now(UTC)
 
     if conv.message_count >= settings.rag_index_threshold:
         await _trigger_conversation_index(db, conv)
+
+
+async def _save_turn_events(
+    db, conversation_id: uuid.UUID, body: dict, events: list[dict]
+) -> None:
+    """
+    Convert structured turn events to ConversationMessage rows.
+
+    Groups:
+      thinking   → assistant message with raw.type=thinking
+      tool_call  → assistant message with raw.type=tool_call
+      tool_result→ tool message
+      chunk      → accumulated into one final assistant message
+    """
+    text_chunks: list[str] = []
+
+    for ev in events:
+        ev_type = ev.get("type")
+        if ev_type == "thinking":
+            db.add(
+                ConversationMessage(
+                    conversation_id=conversation_id,
+                    role=MessageRole.assistant,
+                    content=ev.get("text") or None,
+                    raw=ev,
+                )
+            )
+        elif ev_type == "tool_call":
+            db.add(
+                ConversationMessage(
+                    conversation_id=conversation_id,
+                    role=MessageRole.assistant,
+                    content=None,
+                    raw=ev,
+                )
+            )
+        elif ev_type == "tool_result":
+            db.add(
+                ConversationMessage(
+                    conversation_id=conversation_id,
+                    role=MessageRole.tool,
+                    content=ev.get("content") or None,
+                    raw=ev,
+                )
+            )
+        elif ev_type == "chunk":
+            text_chunks.append(ev.get("text", ""))
+
+    # Final assembled text
+    assembled = "".join(text_chunks)
+    db.add(
+        ConversationMessage(
+            conversation_id=conversation_id,
+            role=MessageRole.assistant,
+            content=assembled or None,
+            raw={**body, "assembled": True},
+        )
+    )
+
+
+def _extract_history_messages(goclaw_history) -> list[dict]:
+    """Normalise chat.history payload to a flat list of message dicts."""
+    if isinstance(goclaw_history, list):
+        return goclaw_history
+    if isinstance(goclaw_history, dict):
+        for key in ("messages", "history", "items"):
+            if isinstance(goclaw_history.get(key), list):
+                return goclaw_history[key]
+    return []
+
+
+def _map_role(role_str: str) -> MessageRole:
+    mapping = {
+        "user": MessageRole.user,
+        "assistant": MessageRole.assistant,
+        "tool": MessageRole.tool,
+        "system": MessageRole.system,
+        "function": MessageRole.tool,
+    }
+    return mapping.get(role_str, MessageRole.assistant)
+
+
+async def _rewrite_from_history(
+    db, conversation_id: uuid.UUID, history_messages: list[dict]
+) -> None:
+    """Delete all local messages and re-insert from GoClaw's authoritative history."""
+    await db.execute(
+        delete(ConversationMessage).where(
+            ConversationMessage.conversation_id == conversation_id
+        )
+    )
+    for msg in history_messages:
+        role = _map_role(msg.get("role", "assistant"))
+        content = msg.get("content")
+        if isinstance(content, list):
+            content = " ".join(
+                p.get("text", "") for p in content if isinstance(p, dict)
+            )
+        db.add(
+            ConversationMessage(
+                conversation_id=conversation_id,
+                role=role,
+                content=str(content) if content is not None else None,
+                raw=msg,
+            )
+        )
 
 
 async def _trigger_conversation_index(db, conv: Conversation) -> None:

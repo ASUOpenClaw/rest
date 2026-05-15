@@ -99,7 +99,7 @@ services:
         build: ../parser
         environment:
             PARSER_NATS_URL: nats://nats:4222
-            PARSER_S3_ENDPOINT: http://garage:3900
+            S3_ENDPOINT_URL: http://garage:3900
             PARSER_QDRANT_URL: http://qdrant:6333
             PARSER_SPEACHES_URL: ${SPEACHES_URL:-http://158.160.62.230:8014}
             PARSER_EMBEDDING_URL: http://litellm:4000/v1
@@ -150,6 +150,7 @@ services:
         volumes:
             - ../skills:/skills:ro
             - ./src:/app/src
+            - ./agent-files:/app/agent-files:ro
         depends_on:
             postgres:
                 condition: service_healthy
