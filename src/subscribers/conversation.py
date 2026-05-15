@@ -277,6 +277,15 @@ def _extract_history_messages(goclaw_history) -> list[dict]:
     if isinstance(goclaw_history, list):
         return goclaw_history
     if isinstance(goclaw_history, dict):
+        # Unwrap outer envelope (full WS response) if present
+        for envelope in ("payload", "result"):
+            inner = goclaw_history.get(envelope)
+            if isinstance(inner, dict):
+                for key in ("messages", "history", "items"):
+                    if isinstance(inner.get(key), list):
+                        return inner[key]
+            if isinstance(inner, list):
+                return inner
         for key in ("messages", "history", "items"):
             if isinstance(goclaw_history.get(key), list):
                 return goclaw_history[key]
