@@ -307,14 +307,25 @@ async def _rewrite_from_history(
         role = _map_role(msg.get("role", "assistant"))
         content = msg.get("content")
         if isinstance(content, list):
-            content = " ".join(
-                p.get("text", "") for p in content if isinstance(p, dict)
-            )
+            parts = []
+            for p in content:
+                if isinstance(p, dict):
+                    parts.append(p.get("text") or p.get("thinking") or "")
+            content = " ".join(parts)
+        # GoClaw stores thinking as a top-level field when content is empty
+        if not content:
+            content = msg.get("thinking") or ""
+        # For tool-call-only turns attach a compact summary so content is non-empty
+        if not content:
+            tool_calls = msg.get("tool_calls") or []
+            if tool_calls:
+                names = ", ".join(tc.get("name", "?") for tc in tool_calls)
+                content = f"[tool_calls: {names}]"
         db.add(
             ConversationMessage(
                 conversation_id=conversation_id,
                 role=role,
-                content=str(content) if content is not None else None,
+                content=content or None,
                 raw=msg,
             )
         )
