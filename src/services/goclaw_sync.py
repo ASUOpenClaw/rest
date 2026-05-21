@@ -75,7 +75,8 @@ async def _sync_all() -> None:
             logger.exception("goclaw_sync: failed for workspace %s", ws.id)
 
 
-async def _sync_workspace(ws: Workspace) -> None:
+async def sync_workspace(ws: Workspace) -> int:
+    """Sync GoClaw sessions → REST conversations for one workspace. Returns session count."""
     ws_id = str(ws.id)
 
     # --- 1. Fetch sessions from Shell ------------------------------------------
@@ -83,10 +84,10 @@ async def _sync_workspace(ws: Workspace) -> None:
         sessions = await shell_client.list_sessions(ws_id)
     except Exception as exc:
         logger.warning("goclaw_sync: workspace %s — Shell unreachable: %s", ws_id, exc)
-        return
+        return 0
 
     if not sessions:
-        return
+        return 0
 
     # --- 2. Resolve user_id → UUID from session key ----------------------------
     # Default session key format: "user-{uuid}"
@@ -109,6 +110,11 @@ async def _sync_workspace(ws: Workspace) -> None:
         await db.commit()
 
     logger.debug("goclaw_sync: workspace %s — synced %d sessions", ws_id, len(sessions))
+    return len(sessions)
+
+
+async def _sync_workspace(ws: Workspace) -> None:
+    await sync_workspace(ws)
 
 
 async def _ensure_conversation(

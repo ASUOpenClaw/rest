@@ -86,7 +86,7 @@ services:
             RAG_QDRANT_COLLECTION: chunks
             RAG_HOST: 0.0.0.0
             RAG_PORT: "8001"
-            RAG_EMBEDDING_URL: http://litellm:4000/v1
+            RAG_EMBEDDING_URL: ${LITELLM_URL:-http://litellm:4000/v1}
         env_file: .env
         depends_on:
             - qdrant
@@ -101,8 +101,10 @@ services:
             PARSER_NATS_URL: nats://nats:4222
             S3_ENDPOINT_URL: http://garage:3900
             PARSER_QDRANT_URL: http://qdrant:6333
-            PARSER_SPEACHES_URL: ${SPEACHES_URL:-http://158.160.62.230:8014}
-            PARSER_EMBEDDING_URL: http://litellm:4000/v1
+            PARSER_SPEACHES_URL: ${LITELLM_BASE_URL:-http://litellm:4000}
+            PARSER_SPEACHES_MODEL: whisper
+            PARSER_SPEACHES_API_KEY: ${LITELLM_API_KEY:-sk-local-dev}
+            PARSER_EMBEDDING_URL: ${LITELLM_URL:-http://litellm:4000/v1}
         env_file: .env
         depends_on:
             - nats

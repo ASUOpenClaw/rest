@@ -1,10 +1,12 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
 from src.core.deps import CurrentAnyAuth, CurrentAuth
+from src.models.workspace import Workspace
 from src.schemas.conversation import (
     ConversationListOut,
     ConversationOut,
@@ -13,6 +15,7 @@ from src.schemas.conversation import (
     MessageOut,
 )
 from src.services import conversation as conv_svc
+from src.services import goclaw_sync
 
 router = APIRouter(prefix="/workspaces/{workspace_id}", tags=["conversations"])
 
@@ -137,3 +140,17 @@ async def delete_conversation(
         user_id=auth.user.id,
         db=db,
     )
+
+
+@router.post("/conversations/sync", status_code=status.HTTP_200_OK)
+async def sync_conversations(
+    workspace_id: uuid.UUID,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger GoClaw → REST conversation sync for this workspace."""
+    ws = await db.scalar(select(Workspace).where(Workspace.id == workspace_id))
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    synced = await goclaw_sync.sync_workspace(ws)
+    return {"synced": synced}

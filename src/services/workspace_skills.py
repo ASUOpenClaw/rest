@@ -2,27 +2,27 @@
 Per-workspace skills.
 
 Storage:  S3/Garage  {ws_id}/skills/{name}.md
-Cache:    Redis       ws_skills:{ws_id}  — combined markdown, TTL 7 days
-                      Rebuilt on every put/delete; Shell reads it at session start
-                      and injects into the system prompt.
+GoClaw:   Agent context file  SKILL_{name}.md  (set via Shell WS-RPC)
+          GoClaw injects context files into the system prompt on every turn,
+          so no per-session injection in Shell is needed.
 
 Name rules: alphanumeric + hyphens/underscores, max 80 chars, no path separators.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
 import redis.asyncio as aioredis
 from fastapi import HTTPException, status
 
-from src.services import s3
+from src.services import s3, shell_client
 
 logger = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
-_SKILLS_TTL = 7 * 24 * 3600  # 7 days
 
 
 def _s3_key(ws_id: str, name: str) -> str:
@@ -33,8 +33,8 @@ def _s3_prefix(ws_id: str) -> str:
     return f"{ws_id}/skills/"
 
 
-def _redis_key(ws_id: str) -> str:
-    return f"ws_skills:{ws_id}"
+def _goclaw_filename(name: str) -> str:
+    return f"SKILL_{name}.md"
 
 
 def _validate_name(name: str) -> None:
@@ -56,7 +56,7 @@ async def list_skills(ws_id: str) -> list[str]:
     keys = await s3.list_objects_prefix(prefix)
     names = []
     for key in keys:
-        tail = key[len(prefix) :]
+        tail = key[len(prefix):]
         if tail.endswith(".md"):
             names.append(tail[:-3])
     return sorted(names)
@@ -75,7 +75,7 @@ async def get_skill(ws_id: str, name: str) -> str:
 
 
 async def put_skill(ws_id: str, name: str, content: str, redis: aioredis.Redis) -> None:
-    """Create or replace a skill and rebuild the Redis cache."""
+    """Create or replace a skill and push it to the GoClaw agent context."""
     _validate_name(name)
     if len(content) > 64 * 1024:
         raise HTTPException(
@@ -83,11 +83,11 @@ async def put_skill(ws_id: str, name: str, content: str, redis: aioredis.Redis) 
             detail="Skill content exceeds 64 KB limit",
         )
     await s3.upload_bytes(content.encode(), _s3_key(ws_id, name), "text/markdown")
-    await _rebuild_cache(ws_id, redis)
+    await _sync_to_goclaw(ws_id, name, content, redis)
 
 
 async def delete_skill(ws_id: str, name: str, redis: aioredis.Redis) -> None:
-    """Delete a skill and rebuild the Redis cache. Raises 404 if not found."""
+    """Delete a skill from S3 and clear it from the GoClaw agent context."""
     _validate_name(name)
     key = _s3_key(ws_id, name)
     if not await s3.object_exists(key):
@@ -95,32 +95,45 @@ async def delete_skill(ws_id: str, name: str, redis: aioredis.Redis) -> None:
             status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found"
         )
     await s3.delete_object(key)
-    await _rebuild_cache(ws_id, redis)
+    await _sync_to_goclaw(ws_id, name, "", redis)
 
 
 # ---------------------------------------------------------------------------
-# Cache management
+# GoClaw sync
 # ---------------------------------------------------------------------------
 
 
-async def _rebuild_cache(ws_id: str, redis: aioredis.Redis) -> None:
-    """Load all skills from S3 and write combined markdown to Redis."""
-    names = await list_skills(ws_id)
-    if not names:
-        await redis.delete(_redis_key(ws_id))
-        return
-
-    parts = ["## Workspace Skills\n"]
-    for name in names:
-        try:
-            key = _s3_key(ws_id, name)
-            content = (await s3.download_bytes(key)).decode()
-            parts.append(f"\n### {name}\n\n{content.strip()}\n")
-        except Exception as exc:
+async def _sync_to_goclaw(
+    ws_id: str, name: str, content: str, redis: aioredis.Redis
+) -> None:
+    """Push (or clear) a skill as a GoClaw agent context file. Non-fatal."""
+    try:
+        raw = await redis.get(f"ws_creds:{ws_id}")
+        if not raw:
             logger.warning(
-                "Could not load skill '%s' for workspace %s: %s", name, ws_id, exc
+                "ws_creds not found for workspace %s — skill '%s' not synced to GoClaw",
+                ws_id,
+                name,
             )
-
-    combined = "\n".join(parts)
-    await redis.setex(_redis_key(ws_id), _SKILLS_TTL, combined)
-    logger.info("Rebuilt skills cache for workspace %s (%d skills)", ws_id, len(names))
+            return
+        creds = json.loads(raw)
+        agent_key = creds.get("agent_id") or creds.get("agent_key", "")
+        if not agent_key:
+            logger.warning(
+                "No agent_key in ws_creds for workspace %s — skill '%s' not synced",
+                ws_id,
+                name,
+            )
+            return
+        await shell_client.set_agent_file(ws_id, agent_key, _goclaw_filename(name), content)
+        logger.info(
+            "Synced skill '%s' to GoClaw agent %s for workspace %s (len=%d)",
+            name,
+            agent_key,
+            ws_id,
+            len(content),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to sync skill '%s' to GoClaw for workspace %s: %s", name, ws_id, exc
+        )
