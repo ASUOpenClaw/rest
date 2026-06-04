@@ -4,7 +4,7 @@ import logging
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import File, TranscriptionTask, WorkspaceMember, WorkspaceRole
@@ -81,6 +81,115 @@ async def enqueue(
         mime_type=file.mime_type,
         language=language,
         include_timestamps=include_timestamps,
+        requested_by=str(user_id),
+    )
+    return task
+
+
+async def list_active_tasks(
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID | str,
+    page: int,
+    per_page: int,
+    db: AsyncSession,
+) -> tuple[list[TranscriptionTask], int]:
+    """Return paginated pending/processing tasks for the workspace."""
+    if str(user_id) != "system":
+        member = await db.scalar(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_id,
+            )
+        )
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+            )
+
+    active_statuses = or_(
+        TranscriptionTask.status == TranscriptionStatus.pending,
+        TranscriptionTask.status == TranscriptionStatus.processing,
+    )
+    base_q = select(TranscriptionTask).where(
+        TranscriptionTask.workspace_id == workspace_id,
+        active_statuses,
+    )
+    total = await db.scalar(select(func.count()).select_from(base_q.subquery()))
+    tasks = (
+        await db.scalars(
+            base_q.order_by(TranscriptionTask.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    ).all()
+    return list(tasks), total or 0
+
+
+async def retry_task(
+    workspace_id: uuid.UUID,
+    task_id: uuid.UUID,
+    user_id: uuid.UUID | str,
+    db: AsyncSession,
+) -> TranscriptionTask:
+    """Re-enqueue a failed transcription task."""
+    if str(user_id) != "system":
+        member = await db.scalar(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_id,
+            )
+        )
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
+            )
+        if not _role_gte(member.role, WorkspaceRole.member):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Requires member role"
+            )
+
+    task = await db.scalar(
+        select(TranscriptionTask).where(
+            TranscriptionTask.id == task_id,
+            TranscriptionTask.workspace_id == workspace_id,
+        )
+    )
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+        )
+    if task.status != TranscriptionStatus.failed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Only failed tasks can be retried, current status: {task.status.value}",
+        )
+
+    file = await db.scalar(
+        select(File).where(File.id == task.file_id, File.workspace_id == workspace_id)
+    )
+    if file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Original file not found"
+        )
+
+    task.status = TranscriptionStatus.processing
+    task.error = None
+    task.completed_at = None
+    task.result = None
+    task.processing_time_sec = None
+    await db.commit()
+    await db.refresh(task)
+
+    await nats_svc.publish_transcription_job(
+        job_id=str(uuid.uuid4()),
+        task_id=str(task.id),
+        workspace_id=str(workspace_id),
+        audio_file_id=str(task.file_id),
+        s3_key=file.s3_key,
+        filename=file.original_name,
+        mime_type=file.mime_type,
+        language=task.language,
+        include_timestamps=task.include_timestamps,
         requested_by=str(user_id),
     )
     return task

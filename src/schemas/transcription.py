@@ -46,6 +46,13 @@ class TranscriptionOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TranscriptionTaskListOut(BaseModel):
+    items: list[TranscriptionTaskOut]
+    total: int
+    page: int
+    per_page: int
+
+
 class TranscriptionListOut(BaseModel):
     items: list[TranscriptionOut]
     total: int
