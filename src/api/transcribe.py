@@ -41,7 +41,7 @@ async def list_active_tasks(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
 ):
-    """List pending and processing transcription tasks for the workspace."""
+    """List all transcription tasks for the workspace, newest first."""
     tasks, total = await transcription_svc.list_active_tasks(
         workspace_id=workspace_id,
         user_id=auth.user.id,

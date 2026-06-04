@@ -4,7 +4,7 @@ import logging
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models import File, TranscriptionTask, WorkspaceMember, WorkspaceRole
@@ -106,13 +106,8 @@ async def list_active_tasks(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Not a workspace member"
             )
 
-    active_statuses = or_(
-        TranscriptionTask.status == TranscriptionStatus.pending,
-        TranscriptionTask.status == TranscriptionStatus.processing,
-    )
     base_q = select(TranscriptionTask).where(
         TranscriptionTask.workspace_id == workspace_id,
-        active_statuses,
     )
     total = await db.scalar(select(func.count()).select_from(base_q.subquery()))
     tasks = (
