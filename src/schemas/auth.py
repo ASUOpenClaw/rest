@@ -3,6 +3,15 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+
+class OAuthAccountOut(BaseModel):
+    id: uuid.UUID
+    provider: str
+    provider_email: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
 # ---------------------------------------------------------------------------
 # User
 # ---------------------------------------------------------------------------
@@ -77,6 +86,15 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class UpdateMeRequest(BaseModel):
+    display_name: str | None = None
+    avatar_url: str | None = None
+    # New password — only allowed if account has a password (not OAuth-only).
+    # To set a password on an OAuth-only account, current_password is not required.
+    new_password: str | None = None
+    current_password: str | None = None
 
 
 # ---------------------------------------------------------------------------

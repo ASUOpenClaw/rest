@@ -1,0 +1,17 @@
+services:
+    redis:
+        ports: !reset []
+
+    nats:
+        ports: !reset []
+
+    api:
+        ports: !reset []
+        environment:
+            CORS_ORIGINS: https://asuclaw.rmnw-panel.ru
+
+    rag:
+        ports: !reset []
+
+    mcp:
+        ports: !reset []

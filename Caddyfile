@@ -1,0 +1,11 @@
+asuclaw.rmnw-panel.ru {
+    reverse_proxy frontend:3000
+}
+
+asuclaw-api.rmnw-panel.ru {
+    reverse_proxy api:8000
+}
+
+asuclaw-shell.rmnw-panel.ru {
+    reverse_proxy shell-shell-1:18080
+}

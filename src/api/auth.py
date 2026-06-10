@@ -15,11 +15,14 @@ from src.schemas.auth import (
     ApiKeyCreateRequest,
     ApiKeyOut,
     LoginRequest,
+    OAuthAccountOut,
     OAuthCallbackOut,
     RegisterRequest,
     TokenRefreshOut,
     TokenRefreshRequest,
+    UpdateMeRequest,
     UserMeOut,
+    UserOut,
 )
 from src.services import auth as auth_svc
 
@@ -85,10 +88,17 @@ async def token_swagger(
 @router.get("/yandex", summary="Initiate Yandex OAuth")
 async def yandex_login(
     state: str | None = Query(default=None),
-    redirect_uri: str | None = Query(default=None),
 ):
     url = auth_svc.yandex_auth_url(state=state)
     return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+
+
+@router.get("/yandex/connect", summary="Get Yandex OAuth URL to connect to existing account")
+async def yandex_connect(auth: CurrentAuth):
+    """Returns the Yandex OAuth URL. Client should redirect the browser to this URL."""
+    state = auth_svc.make_connect_state(str(auth.user.id))
+    url = auth_svc.yandex_auth_url(state=state)
+    return {"url": url}
 
 
 @router.get("/yandex/callback", response_model=OAuthCallbackOut)
@@ -99,7 +109,9 @@ async def yandex_callback(
     redis: aioredis.Redis = Depends(get_redis),
 ):
     try:
-        return await auth_svc.yandex_callback(code=code, db=db, redis=redis)
+        return await auth_svc.yandex_callback(code=code, state=state, db=db, redis=redis)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -185,6 +197,41 @@ async def get_me(
 ):
     data = await auth_svc.get_me(user=auth.user, db=db)
     return UserMeOut(**data)
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_me(
+    body: UpdateMeRequest,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await auth_svc.update_me(
+        user=auth.user,
+        display_name=body.display_name,
+        avatar_url=body.avatar_url,
+        new_password=body.new_password,
+        current_password=body.current_password,
+        db=db,
+    )
+    return UserOut.model_validate(user)
+
+
+@router.get("/me/oauth", response_model=list[OAuthAccountOut])
+async def list_oauth_accounts(
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    accounts = await auth_svc.list_oauth_accounts(user=auth.user, db=db)
+    return [OAuthAccountOut.model_validate(a) for a in accounts]
+
+
+@router.delete("/me/oauth/{provider}", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_oauth(
+    provider: str,
+    auth: CurrentAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    await auth_svc.disconnect_oauth(user=auth.user, provider=provider, db=db)
 
 
 # ---------------------------------------------------------------------------

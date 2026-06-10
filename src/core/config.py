@@ -1,4 +1,4 @@
-from pydantic import AnyHttpUrl
+from pydantic import computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -72,7 +72,16 @@ class Settings(BaseSettings):
     goclaw_mcp_url: str = ""
 
     # Frontend (used for OAuth redirects, CORS)
+    # Set CORS_ORIGINS to override; falls back to FRONTEND_URL.
+    # Multiple origins: comma-separated, e.g. "https://app.example.com,http://localhost:3000"
     frontend_url: str = "http://localhost:3000"
+    cors_origins: str = ""
+
+    @computed_field
+    @property
+    def cors_origins_list(self) -> list[str]:
+        raw = self.cors_origins or self.frontend_url
+        return [o.strip() for o in raw.split(",") if o.strip()]
 
     # Logging
     log_level: str = "INFO"
