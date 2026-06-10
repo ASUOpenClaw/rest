@@ -1,15 +1,17 @@
+import os
 import uuid
 from typing import Annotated
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.db import get_db
 from src.core.deps import CurrentAuth
 from src.core.redis import get_redis
+from src.models.user import User
 from src.schemas.auth import (
     ApiKeyCreatedOut,
     ApiKeyCreateRequest,
@@ -25,6 +27,7 @@ from src.schemas.auth import (
     UserOut,
 )
 from src.services import auth as auth_svc
+from src.services import s3 as s3_svc
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -189,18 +192,39 @@ async def logout(
 # Current user
 # ---------------------------------------------------------------------------
 
+_AVATAR_S3_PREFIX = "avatars/"
+_ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
+def _avatar_api_url(request: Request, user: User) -> str | None:
+    """Return API proxy URL for avatar if user has one stored as s3_key, else raw value."""
+    if not user.avatar_url:
+        return None
+    if user.avatar_url.startswith(_AVATAR_S3_PREFIX):
+        return str(request.url_for("download_avatar", user_id=str(user.id)))
+    return user.avatar_url
+
+
+def _user_out(request: Request, user: User) -> UserOut:
+    data = UserOut.model_validate(user).model_dump()
+    data["avatar_url"] = _avatar_api_url(request, user)
+    return UserOut(**data)
+
 
 @router.get("/me", response_model=UserMeOut)
 async def get_me(
+    request: Request,
     auth: CurrentAuth,
     db: AsyncSession = Depends(get_db),
 ):
     data = await auth_svc.get_me(user=auth.user, db=db)
+    data["avatar_url"] = _avatar_api_url(request, auth.user)
     return UserMeOut(**data)
 
 
 @router.patch("/me", response_model=UserOut)
 async def update_me(
+    request: Request,
     body: UpdateMeRequest,
     auth: CurrentAuth,
     db: AsyncSession = Depends(get_db),
@@ -213,7 +237,59 @@ async def update_me(
         current_password=body.current_password,
         db=db,
     )
-    return UserOut.model_validate(user)
+    return _user_out(request, user)
+
+
+@router.post("/me/avatar", response_model=UserOut)
+async def upload_avatar(
+    request: Request,
+    auth: CurrentAuth,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    mime_type = file.content_type or ""
+    if mime_type not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported image type: {mime_type}. Allowed: {', '.join(_ALLOWED_IMAGE_TYPES)}",
+        )
+
+    # Delete old avatar from S3 if it was uploaded via our endpoint
+    if auth.user.avatar_url and auth.user.avatar_url.startswith(_AVATAR_S3_PREFIX):
+        try:
+            await s3_svc.delete_object(auth.user.avatar_url)
+        except Exception:
+            pass
+
+    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+    s3_key = f"avatars/{auth.user.id}/{uuid.uuid4()}{ext}"
+    await s3_svc.upload_fileobj(file.file, s3_key, mime_type)
+
+    user = await auth_svc.update_me(
+        user=auth.user,
+        display_name=None,
+        avatar_url=s3_key,
+        new_password=None,
+        current_password=None,
+        db=db,
+    )
+    return _user_out(request, user)
+
+
+@router.get("/users/{user_id}/avatar", name="download_avatar")
+async def download_avatar(
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await db.get(User, user_id)
+    if user is None or not user.avatar_url:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not found")
+    if not user.avatar_url.startswith(_AVATAR_S3_PREFIX):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not stored in S3")
+    return StreamingResponse(
+        s3_svc.iter_object(user.avatar_url),
+        media_type="image/jpeg",
+    )
 
 
 @router.get("/me/oauth", response_model=list[OAuthAccountOut])
