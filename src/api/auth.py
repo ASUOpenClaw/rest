@@ -1,3 +1,5 @@
+import asyncio
+import io
 import os
 import uuid
 from typing import Annotated
@@ -194,6 +196,24 @@ async def logout(
 
 _AVATAR_S3_PREFIX = "avatars/"
 _ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_AVATAR_MAX_SIZE = 512  # px, longest side
+_AVATAR_JPEG_QUALITY = 85
+
+
+def _compress_avatar(data: bytes) -> bytes:
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(data))
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+    elif img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        img = bg
+    img.thumbnail((_AVATAR_MAX_SIZE, _AVATAR_MAX_SIZE), Image.LANCZOS)
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=_AVATAR_JPEG_QUALITY, optimize=True)
+    return out.getvalue()
 
 
 def _avatar_api_url(request: Request, user: User) -> str | None:
@@ -261,9 +281,11 @@ async def upload_avatar(
         except Exception:
             pass
 
-    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
-    s3_key = f"avatars/{auth.user.id}/{uuid.uuid4()}{ext}"
-    await s3_svc.upload_fileobj(file.file, s3_key, mime_type)
+    raw = await file.read()
+    compressed = await asyncio.to_thread(_compress_avatar, raw)
+
+    s3_key = f"avatars/{auth.user.id}/{uuid.uuid4()}.jpg"
+    await s3_svc.upload_bytes(compressed, s3_key, "image/jpeg")
 
     user = await auth_svc.update_me(
         user=auth.user,
