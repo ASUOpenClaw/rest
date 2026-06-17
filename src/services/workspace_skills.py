@@ -2,9 +2,8 @@
 Per-workspace skills.
 
 Storage:  S3/Garage  {ws_id}/skills/{name}.md
-GoClaw:   Agent context file  SKILL_{name}.md  (set via Shell WS-RPC)
-          GoClaw injects context files into the system prompt on every turn,
-          so no per-session injection in Shell is needed.
+GoClaw:   Uploaded as a ZIP skill via /v1/skills/upload and granted to the workspace agent.
+          GoClaw injects granted skills into the system prompt automatically.
 
 Name rules: alphanumeric + hyphens/underscores, max 80 chars, no path separators.
 """
@@ -18,7 +17,7 @@ import re
 import redis.asyncio as aioredis
 from fastapi import HTTPException, status
 
-from src.services import s3, shell_client
+from src.services import goclaw_client, s3
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +30,6 @@ def _s3_key(ws_id: str, name: str) -> str:
 
 def _s3_prefix(ws_id: str) -> str:
     return f"{ws_id}/skills/"
-
-
-def _goclaw_filename(name: str) -> str:
-    return f"SKILL_{name}.md"
 
 
 def _validate_name(name: str) -> None:
@@ -75,7 +70,7 @@ async def get_skill(ws_id: str, name: str) -> str:
 
 
 async def put_skill(ws_id: str, name: str, content: str, redis: aioredis.Redis) -> None:
-    """Create or replace a skill and push it to the GoClaw agent context."""
+    """Create or replace a skill and sync it to GoClaw."""
     _validate_name(name)
     if len(content) > 64 * 1024:
         raise HTTPException(
@@ -87,7 +82,7 @@ async def put_skill(ws_id: str, name: str, content: str, redis: aioredis.Redis) 
 
 
 async def delete_skill(ws_id: str, name: str, redis: aioredis.Redis) -> None:
-    """Delete a skill from S3 and clear it from the GoClaw agent context."""
+    """Delete a skill from S3 and GoClaw."""
     _validate_name(name)
     key = _s3_key(ws_id, name)
     if not await s3.object_exists(key):
@@ -95,7 +90,7 @@ async def delete_skill(ws_id: str, name: str, redis: aioredis.Redis) -> None:
             status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found"
         )
     await s3.delete_object(key)
-    await _sync_to_goclaw(ws_id, name, "", redis)
+    await _sync_to_goclaw(ws_id, name, None, redis)
 
 
 # ---------------------------------------------------------------------------
@@ -104,36 +99,29 @@ async def delete_skill(ws_id: str, name: str, redis: aioredis.Redis) -> None:
 
 
 async def _sync_to_goclaw(
-    ws_id: str, name: str, content: str, redis: aioredis.Redis
+    ws_id: str, name: str, content: str | None, redis: aioredis.Redis
 ) -> None:
-    """Push (or clear) a skill as a GoClaw agent context file. Non-fatal."""
+    """Upload (or delete) a skill in GoClaw via the Skills API. Non-fatal."""
     try:
         raw = await redis.get(f"ws_creds:{ws_id}")
         if not raw:
             logger.warning(
-                "ws_creds not found for workspace %s — skill '%s' not synced to GoClaw",
-                ws_id,
-                name,
+                "ws_creds not found for workspace %s — skill '%s' not synced", ws_id, name
             )
             return
         creds = json.loads(raw)
-        agent_key = creds.get("agent_id") or creds.get("agent_key", "")
-        if not agent_key:
+        api_key = creds.get("api_key", "")
+        agent_id = creds.get("agent_id", "")  # UUID
+        if not api_key or not agent_id:
             logger.warning(
-                "No agent_key in ws_creds for workspace %s — skill '%s' not synced",
+                "No api_key/agent_id in ws_creds for workspace %s — skill '%s' not synced",
                 ws_id,
                 name,
             )
             return
-        await shell_client.set_agent_file(ws_id, agent_key, _goclaw_filename(name), content)
-        logger.info(
-            "Synced skill '%s' to GoClaw agent %s for workspace %s (len=%d)",
-            name,
-            agent_key,
-            ws_id,
-            len(content),
-        )
+        if content is not None:
+            await goclaw_client.upload_skill(api_key, agent_id, name, content)
+        else:
+            await goclaw_client.delete_skill_from_goclaw(api_key, agent_id, name)
     except Exception as exc:
-        logger.warning(
-            "Failed to sync skill '%s' to GoClaw for workspace %s: %s", name, ws_id, exc
-        )
+        logger.warning("Failed to sync skill '%s' for workspace %s: %s", name, ws_id, exc)

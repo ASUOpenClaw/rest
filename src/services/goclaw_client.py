@@ -21,6 +21,8 @@ import logging
 import os
 import zipfile
 
+import re
+
 import httpx
 
 from src.core.config import settings
@@ -28,6 +30,12 @@ from src.core.config import settings
 logger = logging.getLogger(__name__)
 
 _SYSTEM_USER = "system"
+
+
+def _to_goclaw_slug(name: str) -> str:
+    """Convert any name to a goclaw-compatible slug (lowercase alphanumeric + hyphens)."""
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return s or "skill"
 
 
 def _derive_service_token(ws_id: str) -> str:
@@ -306,24 +314,35 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
         #    and are found via the normal catalog lookup.
         await _provision_skills_to_agent(client, base, tenant_headers, agent_id)
 
-        # 10. Trigger dependency installation for all skills in this tenant.
-        #     Non-fatal — skills still work for deps that are pre-installed.
-        try:
-            r = await client.post(
-                f"{base}/v1/skills/install-deps",
-                headers=tenant_headers,
-            )
-            if r.is_success:
-                logger.info("Skill deps install triggered for workspace %s", ws_id)
-            else:
-                logger.warning(
-                    "Skill deps install failed for workspace %s: %s %s",
-                    ws_id,
-                    r.status_code,
-                    r.text[:200],
+        # 10. Rescan runtime deps, then install missing ones for all skills in this tenant.
+        #     rescan-deps updates GoClaw's view of what's already available;
+        #     install-deps installs anything still missing after the rescan.
+        #     Both are non-fatal — skills still work for deps that are pre-installed.
+        for deps_path, label in (
+            ("rescan-deps", "rescan"),
+            ("install-deps", "install"),
+        ):
+            try:
+                r = await client.post(
+                    f"{base}/v1/skills/{deps_path}",
+                    headers=tenant_headers,
                 )
-        except Exception as exc:
-            logger.warning("Skill deps install error for workspace %s: %s", ws_id, exc)
+                if r.is_success:
+                    logger.info(
+                        "Skill deps %s triggered for workspace %s", label, ws_id
+                    )
+                else:
+                    logger.warning(
+                        "Skill deps %s failed for workspace %s: %s %s",
+                        label,
+                        ws_id,
+                        r.status_code,
+                        r.text[:200],
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Skill deps %s error for workspace %s: %s", label, ws_id, exc
+                )
 
     # 11. Derive a stable MCP service token from workspace_id + shared secret.
     #     HMAC-SHA256: verifiable by MCP server without any Redis lookup.
@@ -848,6 +867,86 @@ async def delete_storage_file(api_key: str, path: str) -> None:
         logger.warning("GoClaw delete_storage_file error for %s: %s", path, exc)
 
 
+async def upload_skill(api_key: str, agent_id: str, name: str, content: str) -> str | None:
+    """
+    Upload a workspace skill as a ZIP to GoClaw and grant it to the agent.
+    Returns the skill ID, or None on failure.
+    """
+    slug = _to_goclaw_slug(name)
+
+    # Ensure SKILL.md has frontmatter with name field
+    if not content.lstrip().startswith("---"):
+        skill_md = f"---\nname: {name}\ndescription: Workspace skill.\n---\n\n{content}"
+    else:
+        skill_md = content
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{slug}/SKILL.md", skill_md.encode())
+    buf.seek(0)
+
+    base = settings.goclaw_gateway_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}", "X-GoClaw-User-Id": _SYSTEM_USER}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{base}/v1/skills/upload",
+            headers=headers,
+            files={"file": (f"{slug}.zip", buf, "application/zip")},
+        )
+        if not r.is_success:
+            logger.warning("skill upload failed %s: %s", r.status_code, r.text[:300])
+            return None
+
+        skill_id: str | None = r.json().get("id")
+
+        if not skill_id:
+            # unchanged content — look up existing ID by slug
+            r2 = await client.get(f"{base}/v1/skills", headers=headers)
+            if r2.is_success:
+                for s in r2.json().get("skills", []):
+                    if s.get("slug") == slug:
+                        skill_id = s.get("id")
+                        break
+
+        if not skill_id:
+            logger.warning("skill '%s' id not found after upload", slug)
+            return None
+
+        await _grant_skill_to_agent(client, base, headers, skill_id, agent_id)
+        logger.info("skill '%s' (id=%s) uploaded and granted to agent %s", slug, skill_id, agent_id)
+        return skill_id
+
+
+async def delete_skill_from_goclaw(api_key: str, agent_id: str, name: str) -> None:
+    """Revoke agent grant and delete a workspace skill from GoClaw."""
+    slug = _to_goclaw_slug(name)
+    base = settings.goclaw_gateway_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}", "X-GoClaw-User-Id": _SYSTEM_USER}
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(f"{base}/v1/skills", headers=headers)
+        if not r.is_success:
+            return
+        skill_id: str | None = next(
+            (s.get("id") for s in r.json().get("skills", []) if s.get("slug") == slug),
+            None,
+        )
+        if not skill_id:
+            return
+
+        try:
+            await client.delete(
+                f"{base}/v1/skills/{skill_id}/grants/agent/{agent_id}", headers=headers
+            )
+        except Exception as exc:
+            logger.warning("skill grant revoke failed for %s: %s", skill_id, exc)
+
+        r2 = await client.delete(f"{base}/v1/skills/{skill_id}", headers=headers)
+        if not r2.is_success and r2.status_code != 404:
+            logger.warning("skill delete failed %s: %s", r2.status_code, r2.text[:200])
+
+
 async def register_plugin(
     api_key: str,
     agent_id: str,
@@ -862,12 +961,16 @@ async def register_plugin(
     """
     base = settings.goclaw_gateway_url.rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}", "X-GoClaw-User-Id": _SYSTEM_USER}
-    body: dict = {"name": name, "transport": transport, "url": url, "enabled": True}
+    # ponytail: goclaw rejects non-slug names; normalize before sending
+    slug_name = _to_goclaw_slug(name)
+    body: dict = {"name": slug_name, "transport": transport, "url": url, "enabled": True}
     if tool_prefix:
         body["tool_prefix"] = tool_prefix
 
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(f"{base}/v1/mcp/servers", headers=headers, json=body)
+        if not r.is_success:
+            logger.warning("MCP server create failed %s: %s", r.status_code, r.text[:300])
         r.raise_for_status()
         mcp_server_id: str = r.json()["id"]
 
