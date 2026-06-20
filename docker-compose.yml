@@ -115,25 +115,6 @@ services:
             - openclaw-net
         restart: unless-stopped
 
-    mcp:
-        build: ../mcp
-        container_name: mcp
-        ports:
-            - "8002:8002"
-        environment:
-            MCP_REST_URL: http://api:8000/v1
-            MCP_REDIS_URL: redis://redis:6379/0
-            MCP_HOST: 0.0.0.0
-            MCP_PORT: "8002"
-        env_file: .env
-        depends_on:
-            - api
-            - redis
-        networks:
-            - default
-            - openclaw-net
-        restart: unless-stopped
-
     api:
         build: .
         ports:
@@ -148,7 +129,6 @@ services:
             RAG_SERVICE_URL: http://rag:8001
             GOCLAW_GATEWAY_URL: http://goclaw:18790
             GOCLAW_LITELLM_URL: http://litellm:4000/v1
-            SHELL_SERVICE_URL: http://shell-shell-1:18080
         volumes:
             - ../skills:/skills:ro
             - ./src:/app/src

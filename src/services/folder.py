@@ -60,7 +60,8 @@ async def _require_member(
 
 async def _compute_path(folder_id: uuid.UUID, db: AsyncSession) -> str:
     """Walk up parent chain using a recursive CTE; return ' / '-joined path."""
-    cte = text("""
+    cte = text(
+        """
         WITH RECURSIVE ancestors AS (
             SELECT id, name, parent_id, 0 AS depth
             FROM folders
@@ -71,7 +72,8 @@ async def _compute_path(folder_id: uuid.UUID, db: AsyncSession) -> str:
             JOIN ancestors a ON f.id = a.parent_id
         )
         SELECT name FROM ancestors ORDER BY depth DESC
-    """)
+    """
+    )
     result = await db.execute(cte, {"folder_id": str(folder_id)})
     names = [row[0] for row in result.fetchall()]
     return " / ".join(names)
@@ -80,7 +82,8 @@ async def _compute_path(folder_id: uuid.UUID, db: AsyncSession) -> str:
 async def _compute_breadcrumbs(
     folder_id: uuid.UUID, db: AsyncSession
 ) -> list[BreadcrumbItem]:
-    cte = text("""
+    cte = text(
+        """
         WITH RECURSIVE ancestors AS (
             SELECT id, name, parent_id, 0 AS depth
             FROM folders
@@ -91,7 +94,8 @@ async def _compute_breadcrumbs(
             JOIN ancestors a ON f.id = a.parent_id
         )
         SELECT id, name FROM ancestors ORDER BY depth DESC
-    """)
+    """
+    )
     result = await db.execute(cte, {"folder_id": str(folder_id)})
     return [BreadcrumbItem(id=row[0], name=row[1]) for row in result.fetchall()]
 
@@ -147,7 +151,8 @@ async def _is_descendant(
     folder_id: uuid.UUID, candidate_parent_id: uuid.UUID, db: AsyncSession
 ) -> bool:
     """Return True if candidate_parent_id is folder_id or a descendant of it."""
-    cte = text("""
+    cte = text(
+        """
         WITH RECURSIVE descendants AS (
             SELECT id FROM folders WHERE id = :folder_id
             UNION ALL
@@ -155,7 +160,8 @@ async def _is_descendant(
             JOIN descendants d ON f.parent_id = d.id
         )
         SELECT 1 FROM descendants WHERE id = :candidate_id LIMIT 1
-    """)
+    """
+    )
     result = await db.execute(
         cte, {"folder_id": str(folder_id), "candidate_id": str(candidate_parent_id)}
     )
@@ -231,7 +237,8 @@ async def list_folders(
 
     if recursive:
         # Return all descendants as flat list via recursive CTE
-        cte = text("""
+        cte = text(
+            """
             WITH RECURSIVE descendants AS (
                 SELECT id FROM folders
                 WHERE workspace_id = :ws_id
@@ -242,7 +249,8 @@ async def list_folders(
                 JOIN descendants d ON f.parent_id = d.id
             )
             SELECT id FROM descendants
-        """)
+        """
+        )
         result = await db.execute(
             cte,
             {

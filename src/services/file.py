@@ -71,7 +71,8 @@ async def _folder_ref(
         return None
     # Compute path via recursive CTE
     path_result = await db.execute(
-        text("""
+        text(
+            """
             WITH RECURSIVE ancestors AS (
                 SELECT id, name, parent_id, 0 AS depth
                 FROM folders WHERE id = :fid
@@ -80,7 +81,8 @@ async def _folder_ref(
                 FROM folders f JOIN ancestors a ON f.id = a.parent_id
             )
             SELECT name FROM ancestors ORDER BY depth DESC
-        """),
+        """
+        ),
         {"fid": str(folder_id)},
     )
     names = [row[0] for row in path_result.fetchall()]
@@ -261,7 +263,8 @@ async def list_files(
             q = q.where(File.folder_id.is_(None))
         elif recursive:
             # All descendants of folder_id via CTE
-            cte = text("""
+            cte = text(
+                """
                 WITH RECURSIVE descendants AS (
                     SELECT id FROM folders WHERE id = :fid
                     UNION ALL
@@ -269,7 +272,8 @@ async def list_files(
                     JOIN descendants d ON f.parent_id = d.id
                 )
                 SELECT id FROM descendants
-            """)
+            """
+            )
             result = await db.execute(cte, {"fid": str(folder_id)})
             folder_ids = [row[0] for row in result.fetchall()]
             q = q.where(File.folder_id.in_(folder_ids))

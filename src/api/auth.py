@@ -5,7 +5,16 @@ import uuid
 from typing import Annotated
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,7 +107,9 @@ async def yandex_login(
     return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
 
 
-@router.get("/yandex/connect", summary="Get Yandex OAuth URL to connect to existing account")
+@router.get(
+    "/yandex/connect", summary="Get Yandex OAuth URL to connect to existing account"
+)
 async def yandex_connect(auth: CurrentAuth):
     """Returns the Yandex OAuth URL. Client should redirect the browser to this URL."""
     state = auth_svc.make_connect_state(str(auth.user.id))
@@ -114,7 +125,9 @@ async def yandex_callback(
     redis: aioredis.Redis = Depends(get_redis),
 ):
     try:
-        return await auth_svc.yandex_callback(code=code, state=state, db=db, redis=redis)
+        return await auth_svc.yandex_callback(
+            code=code, state=state, db=db, redis=redis
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -305,9 +318,13 @@ async def download_avatar(
 ):
     user = await db.get(User, user_id)
     if user is None or not user.avatar_url:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not found"
+        )
     if not user.avatar_url.startswith(_AVATAR_S3_PREFIX):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not stored in S3")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Avatar not stored in S3"
+        )
     return StreamingResponse(
         s3_svc.iter_object(user.avatar_url),
         media_type="image/jpeg",

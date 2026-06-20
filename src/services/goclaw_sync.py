@@ -28,7 +28,7 @@ from src.core.config import settings
 from src.core.db import AsyncSessionLocal
 from src.models import Conversation
 from src.models.workspace import Workspace, WorkspaceMember, WorkspaceRole
-from src.services import shell_client
+from src.services import goclaw_rpc
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +79,16 @@ async def sync_workspace(ws: Workspace) -> int:
     """Sync GoClaw sessions → REST conversations for one workspace. Returns session count."""
     ws_id = str(ws.id)
 
-    # --- 1. Fetch sessions from Shell ------------------------------------------
+    # --- 1. Fetch sessions from GoClaw via WS-RPC --------------------------------
+    cfg = ws.config or {}
+    api_key = cfg.get("goclaw_api_key", "")
+    agent_key = cfg.get("goclaw_agent_key", "")
     try:
-        sessions = await shell_client.list_sessions(ws_id)
+        sessions = await goclaw_rpc.get_pool().list_sessions(api_key, agent_key)
     except Exception as exc:
-        logger.warning("goclaw_sync: workspace %s — Shell unreachable: %s", ws_id, exc)
+        logger.warning(
+            "goclaw_sync: workspace %s — GoClaw WS-RPC unreachable: %s", ws_id, exc
+        )
         return 0
 
     if not sessions:

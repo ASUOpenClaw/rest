@@ -60,7 +60,12 @@ async def lifespan(app: FastAPI):
         await conversation.start(js)
         await transcription_sub.start(js)
 
-    if settings.goclaw_sync_interval_seconds > 0 and settings.shell_service_key:
+    from src.services import goclaw_rpc as rpc_svc
+
+    pool = rpc_svc.init_pool()
+    pool.start()
+
+    if settings.goclaw_sync_interval_seconds > 0:
         from src.services import goclaw_sync
 
         await goclaw_sync.start()
@@ -68,6 +73,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # --- shutdown ---
+    await pool.stop()
     await nats_svc.close()
     await meili_svc.close()
 
@@ -78,6 +84,7 @@ app = FastAPI(title="OpenClaw REST API", version="0.1.0", lifespan=lifespan)
 @app.get("/health", tags=["health"])
 async def health() -> dict:
     return {"status": "ok"}
+
 
 app.add_middleware(
     CORSMiddleware,

@@ -92,9 +92,15 @@ class Settings(BaseSettings):
     # MCP service shared secret (used by mcp/ service to call REST API on behalf of users)
     mcp_service_key: str = ""
 
-    # Shell service (WS RPC bridge to GoClaw)
-    shell_service_url: str = "http://shell-shell-1:8080"
-    shell_service_key: str = "shell-service-key"  # X-Shell-Service-Key shared secret
+    # GoClaw WebSocket RPC (replaces shell service)
+    goclaw_gateway_ws_url: str = "ws://goclaw:18790/ws"
+
+    # GoClaw webhook secret — shared with GoClaw for turn_end and file-created webhooks
+    goclaw_webhook_secret: str = ""
+
+    # Tools service — lightweight FastAPI service for GoClaw HTTP tools
+    tools_service_url: str = "http://tools:8003"
+    tools_service_key: str = ""
 
     # Background GoClaw sync (session → conversation reconciliation)
     goclaw_sync_interval_seconds: int = 300  # 0 = disabled

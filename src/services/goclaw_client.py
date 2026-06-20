@@ -19,9 +19,8 @@ import io
 import json
 import logging
 import os
-import zipfile
-
 import re
+import zipfile
 
 import httpx
 
@@ -279,33 +278,14 @@ async def provision_workspace(ws_id: str, ws_name: str) -> dict:
             ws_id,
         )
 
-        # 8. Register MCP server and grant to agent (if configured)
-        if settings.goclaw_mcp_url:
-            r = await client.post(
-                f"{base}/v1/mcp/servers",
-                headers=tenant_headers,
-                json={
-                    "name": "workspace-tools",
-                    "transport": "streamable-http",
-                    "url": settings.goclaw_mcp_url,
-                    "tool_prefix": settings.goclaw_mcp_tool_prefix,
-                    "enabled": True,
-                },
-            )
-            r.raise_for_status()
-            mcp_server_id: str = r.json()["id"]
+        # 8. Register HTTP custom tools (replaces MCP server)
+        if settings.tools_service_url:
+            await _provision_http_tools(client, base, tenant_headers, agent_id)
+            logger.info("HTTP tools provisioned for workspace %s", ws_id)
 
-            r = await client.post(
-                f"{base}/v1/mcp/servers/{mcp_server_id}/grants/agent",
-                headers=tenant_headers,
-                json={"agent_id": agent_id},
-            )
-            r.raise_for_status()
-            logger.info(
-                "GoClaw MCP server granted to agent %s for workspace %s",
-                agent_id,
-                ws_id,
-            )
+        # 8b. Register EventTurnEnd webhook so GoClaw notifies us after each turn.
+        if settings.goclaw_webhook_secret:
+            await _register_turn_end_webhook(client, base, tenant_headers)
 
         # 9. Provision default skills into this tenant and grant to agent.
         #    Skills from GOCLAW_SKILLS_DIR are uploaded directly into the tenant
@@ -867,7 +847,9 @@ async def delete_storage_file(api_key: str, path: str) -> None:
         logger.warning("GoClaw delete_storage_file error for %s: %s", path, exc)
 
 
-async def upload_skill(api_key: str, agent_id: str, name: str, content: str) -> str | None:
+async def upload_skill(
+    api_key: str, agent_id: str, name: str, content: str
+) -> str | None:
     """
     Upload a workspace skill as a ZIP to GoClaw and grant it to the agent.
     Returns the skill ID, or None on failure.
@@ -914,7 +896,12 @@ async def upload_skill(api_key: str, agent_id: str, name: str, content: str) -> 
             return None
 
         await _grant_skill_to_agent(client, base, headers, skill_id, agent_id)
-        logger.info("skill '%s' (id=%s) uploaded and granted to agent %s", slug, skill_id, agent_id)
+        logger.info(
+            "skill '%s' (id=%s) uploaded and granted to agent %s",
+            slug,
+            skill_id,
+            agent_id,
+        )
         return skill_id
 
 
@@ -963,14 +950,21 @@ async def register_plugin(
     headers = {"Authorization": f"Bearer {api_key}", "X-GoClaw-User-Id": _SYSTEM_USER}
     # ponytail: goclaw rejects non-slug names; normalize before sending
     slug_name = _to_goclaw_slug(name)
-    body: dict = {"name": slug_name, "transport": transport, "url": url, "enabled": True}
+    body: dict = {
+        "name": slug_name,
+        "transport": transport,
+        "url": url,
+        "enabled": True,
+    }
     if tool_prefix:
         body["tool_prefix"] = tool_prefix
 
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(f"{base}/v1/mcp/servers", headers=headers, json=body)
         if not r.is_success:
-            logger.warning("MCP server create failed %s: %s", r.status_code, r.text[:300])
+            logger.warning(
+                "MCP server create failed %s: %s", r.status_code, r.text[:300]
+            )
         r.raise_for_status()
         mcp_server_id: str = r.json()["id"]
 
@@ -982,6 +976,115 @@ async def register_plugin(
         r.raise_for_status()
         logger.info("Plugin '%s' registered and granted to agent %s", name, agent_id)
         return mcp_server_id
+
+
+_HTTP_TOOLS: list[dict] = [
+    {
+        "name": "rag_search",
+        "handler_type": "http",
+        "description": "Search workspace documents using semantic similarity",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "top_k": {"type": "integer", "default": 5},
+                "folder_id": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+        "config": {
+            "url": f"{settings.tools_service_url}/rag/search",
+            "method": "POST",
+            "headers": {"X-Service-Key": settings.tools_service_key},
+            "timeout": 10,
+        },
+    },
+    {
+        "name": "list_files",
+        "handler_type": "http",
+        "description": "List files in the workspace",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "folder_id": {"type": "string"},
+                "page": {"type": "integer", "default": 1},
+            },
+        },
+        "config": {
+            "url": f"{settings.tools_service_url}/files/list",
+            "method": "POST",
+            "headers": {"X-Service-Key": settings.tools_service_key},
+            "timeout": 10,
+        },
+    },
+    {
+        "name": "list_conversations",
+        "handler_type": "http",
+        "description": "List recent conversations in the workspace",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "default": 1},
+                "limit": {"type": "integer", "default": 20},
+            },
+        },
+        "config": {
+            "url": f"{settings.tools_service_url}/conversations/list",
+            "method": "POST",
+            "headers": {"X-Service-Key": settings.tools_service_key},
+            "timeout": 10,
+        },
+    },
+]
+
+
+async def _register_turn_end_webhook(
+    client: httpx.AsyncClient,
+    base: str,
+    tenant_headers: dict,
+) -> None:
+    """Register EventTurnEnd webhook in GoClaw so we receive turn history."""
+    rest_url = (
+        settings.rest_service_url.rstrip("/")
+        if hasattr(settings, "rest_service_url")
+        else "http://api:8000"
+    )
+    body = {
+        "event": "turn_end",
+        "handler_type": "http",
+        "config": {
+            "url": f"{rest_url}/api/internal/turn-event",
+            "headers": {"X-Service-Key": settings.goclaw_webhook_secret},
+            "timeout": 5,
+        },
+    }
+    r = await client.post(f"{base}/v1/hooks", headers=tenant_headers, json=body)
+    if not r.is_success:
+        logger.warning(
+            "turn_end webhook registration failed: %s %s", r.status_code, r.text[:200]
+        )
+
+
+async def _provision_http_tools(
+    client: httpx.AsyncClient,
+    base: str,
+    tenant_headers: dict,
+    agent_id: str,
+) -> None:
+    """Register HTTP custom tools in GoClaw for the provisioned agent."""
+    for tool in _HTTP_TOOLS:
+        r = await client.post(
+            f"{base}/v1/tools/custom?agent_id={agent_id}",
+            headers=tenant_headers,
+            json=tool,
+        )
+        if not r.is_success:
+            logger.warning(
+                "HTTP tool registration failed for %s: %s %s",
+                tool["name"],
+                r.status_code,
+                r.text[:200],
+            )
 
 
 async def unregister_plugin(api_key: str, agent_id: str, mcp_server_id: str) -> None:

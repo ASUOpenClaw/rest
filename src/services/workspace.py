@@ -22,7 +22,7 @@ from src.models import (
     WorkspaceRole,
 )
 from src.schemas.workspace import WorkspaceStats
-from src.services import goclaw_client, meili, shell_client
+from src.services import goclaw_client, goclaw_rpc, meili
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +41,8 @@ _ROLE_ORDER = [
 _AGENT_FILES_DIR = Path(__file__).parent.parent.parent / "agent-files"
 
 
-def _build_agent_instructions(service_token: str) -> str:
-    """Load CAPABILITIES.md template from disk and inject the service token."""
-    tmpl = (_AGENT_FILES_DIR / "CAPABILITIES.md").read_text()
-    return tmpl.replace("{service_token}", service_token)
+def _build_agent_instructions() -> str:
+    return (_AGENT_FILES_DIR / "CAPABILITIES.md").read_text()
 
 
 def _build_soul_instructions(additional_prompt: str | None) -> str:
@@ -142,26 +140,20 @@ async def create_workspace(
                 # agent as a context file. GoClaw injects context files into
                 # the system prompt on every turn, so the agent always has
                 # these rules without Shell needing to inject them per-session.
-                service_token = goclaw.get("goclaw_mcp_service_token", "")
+                api_key = goclaw.get("goclaw_api_key", "")
                 agent_key = goclaw.get("goclaw_agent_key", "")
-                if (
-                    agent_key
-                    and settings.shell_service_url
-                    and settings.shell_service_key
-                ):
+                if agent_key:
                     agent_files: list[tuple[str, str]] = [
-                        ("CAPABILITIES.md", _build_agent_instructions(service_token)),
+                        ("CAPABILITIES.md", _build_agent_instructions()),
                         ("SOUL.md", _build_soul_instructions(ws.system_prompt)),
-                        ("BOOTSTRAP.md", ""),  # empty → skip bootstrap ritual
+                        ("BOOTSTRAP.md", ""),
                     ]
                     for fname, content in agent_files:
                         try:
-                            await shell_client.set_agent_file(
-                                str(ws.id), agent_key, fname, content
+                            await goclaw_rpc.get_pool().set_agent_file(
+                                api_key, agent_key, fname, content
                             )
-                            logger.info(
-                                "Agent %s set for workspace %s", fname, ws.id
-                            )
+                            logger.info("Agent %s set for workspace %s", fname, ws.id)
                         except Exception as exc:
                             logger.warning(
                                 "Failed to set agent %s for workspace %s: %s",

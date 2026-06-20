@@ -185,10 +185,14 @@ async def _handle_response(
 ) -> None:
     conv = await db.get(Conversation, conversation_id)
     if conv is None:
-        logger.warning("conversation: response for unknown conversation %s", conversation_id)
+        logger.warning(
+            "conversation: response for unknown conversation %s", conversation_id
+        )
         return
 
-    history_messages = _extract_history_messages(goclaw_history) if goclaw_history is not None else []
+    history_messages = (
+        _extract_history_messages(goclaw_history) if goclaw_history is not None else []
+    )
 
     if history_messages:
         # GoClaw history available — always use it as the source of truth.

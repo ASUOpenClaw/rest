@@ -51,7 +51,7 @@ async def list_skills(ws_id: str) -> list[str]:
     keys = await s3.list_objects_prefix(prefix)
     names = []
     for key in keys:
-        tail = key[len(prefix):]
+        tail = key[len(prefix) :]
         if tail.endswith(".md"):
             names.append(tail[:-3])
     return sorted(names)
@@ -106,7 +106,9 @@ async def _sync_to_goclaw(
         raw = await redis.get(f"ws_creds:{ws_id}")
         if not raw:
             logger.warning(
-                "ws_creds not found for workspace %s — skill '%s' not synced", ws_id, name
+                "ws_creds not found for workspace %s — skill '%s' not synced",
+                ws_id,
+                name,
             )
             return
         creds = json.loads(raw)
@@ -124,4 +126,6 @@ async def _sync_to_goclaw(
         else:
             await goclaw_client.delete_skill_from_goclaw(api_key, agent_id, name)
     except Exception as exc:
-        logger.warning("Failed to sync skill '%s' for workspace %s: %s", name, ws_id, exc)
+        logger.warning(
+            "Failed to sync skill '%s' for workspace %s: %s", name, ws_id, exc
+        )

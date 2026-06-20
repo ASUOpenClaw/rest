@@ -210,7 +210,7 @@ def make_connect_state(user_id: str) -> str:
 def parse_connect_state(state: str | None) -> str | None:
     """Return user_id if state encodes a connect request, else None."""
     if state and state.startswith(CONNECT_STATE_PREFIX):
-        return state[len(CONNECT_STATE_PREFIX):]
+        return state[len(CONNECT_STATE_PREFIX) :]
     return None
 
 
@@ -262,7 +262,8 @@ async def yandex_callback(
     db: AsyncSession,
     redis: aioredis.Redis,
 ) -> OAuthCallbackOut:
-    from fastapi import HTTPException, status as http_status
+    from fastapi import HTTPException
+    from fastapi import status as http_status
 
     info = await _fetch_yandex_userinfo(code)
 
@@ -277,7 +278,9 @@ async def yandex_callback(
     if connect_user_id:
         user = await db.get(User, uuid.UUID(connect_user_id))
         if user is None:
-            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="User not found")
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND, detail="User not found"
+            )
         await _connect_oauth(
             db=db,
             user=user,
@@ -391,7 +394,8 @@ async def _connect_oauth(
     email: str,
     avatar_url: str | None,
 ) -> None:
-    from fastapi import HTTPException, status as http_status
+    from fastapi import HTTPException
+    from fastapi import status as http_status
 
     # Check not already linked to another account
     result = await db.execute(
@@ -429,12 +433,15 @@ async def list_oauth_accounts(user: User, db: AsyncSession) -> list[OAuthAccount
 
 
 async def disconnect_oauth(user: User, provider: str, db: AsyncSession) -> None:
-    from fastapi import HTTPException, status as http_status
+    from fastapi import HTTPException
+    from fastapi import status as http_status
 
     try:
         provider_enum = OAuthProvider(provider)
     except ValueError:
-        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Unknown provider")
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST, detail="Unknown provider"
+        )
 
     result = await db.execute(
         select(OAuthAccount).where(
@@ -444,7 +451,10 @@ async def disconnect_oauth(user: User, provider: str, db: AsyncSession) -> None:
     )
     account = result.scalar_one_or_none()
     if account is None:
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="OAuth account not linked")
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="OAuth account not linked",
+        )
 
     if user.password_hash is None:
         other = await db.execute(
@@ -558,7 +568,9 @@ async def update_me(
 
     if new_password is not None:
         if user.password_hash is not None:
-            if not current_password or not verify_password(current_password, user.password_hash):
+            if not current_password or not verify_password(
+                current_password, user.password_hash
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Current password is incorrect",
